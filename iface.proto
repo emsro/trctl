@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+import 'nanopb.proto';
+option(nanopb_fileopt).include = '<npb_extra.h>';
+
+message unit{}
+
+message timestamp {
+    int64 sec = 1;
+    int32 nsec = 2;
+}
+
+message init_msg {
+    string mac_addr = 1 [(nanopb).callback_datatype = "char*"]; 
+    string version = 2 [(nanopb).callback_datatype = "char*"];
+    timestamp uptime = 3;
+}
+
+message file_transfer_start {
+    string filename = 1 [(nanopb).callback_datatype = "char*"];
+    uint64 filesize = 2;
+    uint32 seq = 3;
+}
+
+message file_transfer_data {
+    bytes data = 1 [(nanopb).callback_datatype = "struct npb_data"];
+    uint64 offset = 2;
+    uint32 seq = 3;
+}
+
+message file_transfer_end {
+    uint32 seq = 1;
+    uint32 fnv1a = 2;
+}
+
+message file_resp {
+    bool success = 1;
+}
+
+
+message unit_to_hub {
+    timestamp ts = 1;
+    oneof sub {
+        init_msg init = 2; 
+        file_resp file_resp = 3;
+    }
+}
+
+message hub_to_unit {
+    timestamp ts = 1 ;
+    oneof sub {
+        unit get_init = 2;
+        file_transfer_start file_transfer_start = 3;
+        file_transfer_data file_transfer_data = 4; 
+        file_transfer_end file_transfer_end = 5;
+    }
+}
