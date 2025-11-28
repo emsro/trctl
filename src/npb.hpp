@@ -13,9 +13,9 @@ namespace trctl
 
 struct npb_istream_ctx
 {
-        std::span< uint8_t >    buff;
-        circular_buffer_memory& mem;
-        size_t                  pos = 0;
+        std::span< uint8_t const > buff;
+        circular_buffer_memory&    mem;
+        size_t                     pos = 0;
 };
 
 inline bool npb_istream_cb( pb_istream_t* istream, pb_byte_t* buf, size_t count )
@@ -85,7 +85,10 @@ inline bool
 npb_handle_string_field( pb_istream_t* istream, pb_ostream_t* ostream, pb_field_t const* field )
 {
         if ( ostream ) {
-                char* str = *(char**) field->pData;
+                char const* str = *(char const**) field->pData;
+
+                if ( !str )
+                        return true;
 
                 if ( !pb_encode_tag_for_field( ostream, field ) )
                         return false;
@@ -98,9 +101,54 @@ npb_handle_string_field( pb_istream_t* istream, pb_ostream_t* ostream, pb_field_
                 if ( !buffer )
                         return false;
 
-                *(char**) field->pData = (char*) buffer;
+                *(char const**) field->pData = (char const*) buffer;
                 memset( buffer, 0, istream->bytes_left + 1 );
                 if ( !pb_read( istream, buffer, istream->bytes_left ) )
+                        return false;
+
+                return true;
+        }
+        return false;
+}
+
+inline bool npb_handle_repeated_string_field(
+    pb_istream_t*     istream,
+    pb_ostream_t*     ostream,
+    pb_field_t const* field )
+{
+        if ( ostream ) {
+                npb_str* str = *(npb_str**) field->pData;
+                for ( ; str != nullptr; str = str->next ) {
+                        if ( !pb_encode_tag_for_field( ostream, field ) )
+                                return false;
+
+                        if ( !pb_encode_string(
+                                 ostream, (uint8_t const*) str->str, strlen( str->str ) ) )
+                                return false;
+                }
+                return true;
+        }
+        if ( istream ) {
+                npb_istream_ctx* ctx = ctx_of( istream );
+                npb_str**        trg = (npb_str**) field->pData;
+                while ( ( *trg ) )
+                        trg = &( ( *trg )->next );
+
+                auto* pp = ctx->mem.allocate( sizeof( npb_str ), alignof( npb_str ) );
+                if ( !pp )
+                        return false;
+                *trg = new ( pp ) npb_str{
+                    .str  = nullptr,
+                    .next = nullptr,
+                };
+
+                auto* p = (char*) ctx->mem.allocate( istream->bytes_left + 1, 1 );
+                if ( !p )
+                        return false;
+
+                memset( p, 0, istream->bytes_left + 1 );
+                ( *trg )->str = p;
+                if ( !pb_read( istream, (pb_byte_t*) ( *trg )->str, istream->bytes_left ) )
                         return false;
 
                 return true;
@@ -112,22 +160,24 @@ inline bool
 npb_handle_data_field( pb_istream_t* istream, pb_ostream_t* ostream, pb_field_t const* field )
 {
         if ( ostream ) {
-                struct npb_data* data = *(struct npb_data**) field->pData;
+                struct npb_data* data = (struct npb_data*) field->pData;
                 if ( !data )
                         return false;
 
                 if ( !pb_encode_tag_for_field( ostream, field ) )
                         return false;
-                return pb_encode_string( ostream, (uint8_t const*) data->data, data->size );
+                if ( !pb_encode_string( ostream, (uint8_t const*) data->data, data->size ) )
+                        return false;
+                return true;
         }
         if ( istream ) {
-                npb_istream_ctx* ctx = ctx_of( istream );
-                auto*            buffer =
-                    (pb_byte_t*) ctx->mem.allocate( istream->bytes_left, alignof( uint8_t ) );
+                npb_istream_ctx* ctx    = ctx_of( istream );
+                auto*            buffer = (pb_byte_t*) ctx->mem.allocate( istream->bytes_left, 1 );
                 if ( !buffer )
                         return false;
 
-                struct npb_data* data = *(struct npb_data**) field->pData;
+
+                struct npb_data* data = (struct npb_data*) field->pData;
                 data->data            = buffer;
                 data->size            = istream->bytes_left;
                 if ( !pb_read( istream, buffer, istream->bytes_left ) )

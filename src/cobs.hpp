@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <span>
+#include <tuple>
 
 namespace trctl
 {

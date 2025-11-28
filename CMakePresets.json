@@ -109,6 +109,23 @@
       ]
     },
     {
+      "name": "ubsan",
+      "steps": [
+        {
+          "name": "ubsan",
+          "type": "configure"
+        },
+        {
+          "name": "ubsan",
+          "type": "build"
+        },
+        {
+          "name": "ubsan",
+          "type": "test"
+        }
+      ]
+    },
+    {
       "name": "asan",
       "steps": [
         {

@@ -2,6 +2,7 @@
 #include "../src/client.hpp"
 #include "../src/server.hpp"
 #include "../src/util.hpp"
+#include "./tutil.hpp"
 #include "ecor/ecor.hpp"
 #include "uv.h"
 
@@ -26,14 +27,6 @@ namespace trctl
 {
 
 
-void run_loop( uv_loop_t* loop, std::size_t max_iters )
-{
-        for ( std::size_t i = 0; i < max_iters; ++i ) {
-                auto r = uv_run( loop, UV_RUN_NOWAIT );
-                EXPECT_GT( r, 0 ) << "Error: " << uv_strerror( r );
-        }
-}
-
 TEST( server, init )
 {
         spdlog::info( "pong" );
@@ -53,34 +46,6 @@ TEST( server, init )
         uv_loop_close( loop );
 }
 
-struct nd_mem
-{
-        void* allocate( std::size_t bytes, std::size_t align )
-        {
-                return ::operator new( bytes, std::align_val_t( align ) );
-        }
-
-        void deallocate( void* p, std::size_t bytes, std::size_t align )
-        {
-                ::operator delete( p, std::align_val_t( align ) );
-        }
-};
-
-struct test_ctx
-{
-        nd_mem               mem;
-        ecor::task_allocator alloc{ mem };
-        ecor::task_core      core;
-};
-
-auto& get_task_alloc( test_ctx& ctx )
-{
-        return ctx.alloc;
-}
-auto& get_task_core( test_ctx& ctx )
-{
-        return ctx.core;
-}
 
 void init_both( uv_loop_t* loop, server& s, client& c )
 {
@@ -88,7 +53,7 @@ void init_both( uv_loop_t* loop, server& s, client& c )
         EXPECT_EQ( 0, ret ) << "Error: " << uv_strerror( ret );
         ret = uv_run( loop, UV_RUN_NOWAIT );
 
-        auto [ip, port] = get_connection_info( &s, sock_kind::SOCK );
+        auto [ip, port] = get_connection_info( &s.tcp, sock_kind::SOCK );
         spdlog::info( "Server listening on {}:{}", ip, port );
         ret = client_init( c, loop, "0.0.0.0", port );
         EXPECT_EQ( 0, ret ) << "Error: " << uv_strerror( ret );
@@ -114,7 +79,8 @@ count_connections( test_ctx& ctx, server& srv, int& new_counter, int& disc_count
         handler h{ new_counter, disc_counter };
 
         for ( ;; ) {
-                auto e = co_await ( srv.new_event() || srv.disc_event() );
+                spdlog::info( "Waiting for server event" );
+                auto e = co_await ( ( srv.new_event() || srv.disc_event() ) | ecor::as_variant );
                 spdlog::info( "Event received" );
                 std::visit( h, e );
         }
@@ -123,7 +89,6 @@ count_connections( test_ctx& ctx, server& srv, int& new_counter, int& disc_count
 TEST( server, new_conn )
 {
         mem_usage_guard g;
-        uv_loop_t*      loop = uv_default_loop();
 
         server server;
         client client;
@@ -131,64 +96,66 @@ TEST( server, new_conn )
         int      new_counter  = 0;
         int      disc_counter = 0;
         test_ctx ctx;
-        auto     t1 = count_connections( ctx, server, new_counter, disc_counter );
+        auto     t1 = count_connections( ctx, server, new_counter, disc_counter )
+                      .connect( ecor::_dummy_receiver{} );
+        t1.start();
 
-        init_both( loop, server, client );
-        run_loop( loop, 20 );
+        init_both( ctx.loop, server, client );
+        run_loop( ctx.loop, 20 );
 
         uv_close( (uv_handle_t*) &client, nullptr );
-        run_loop( loop, 20 );
+        run_loop( ctx.loop, 20 );
 
-        uv_stop( loop );
-        uv_run( loop, UV_RUN_ONCE );
-        uv_loop_close( loop );
+        // Close the server handle
+        uv_close( (uv_handle_t*) &server.tcp, nullptr );
+        run_loop( ctx.loop, 20 );
 
         EXPECT_EQ( new_counter, 1 );
         EXPECT_EQ( disc_counter, 1 );
 }
 
-ecor::task< void > server_client_coro( test_ctx& ctx, uv_loop_t* loop, server& s, auto&& f )
-{
-        for ( ;; ) {
-                auto evt = co_await ( s.new_event() || s.disc_event() );
-                if ( auto* e = std::get_if< server::new_client >( &evt ) )
-                        co_await f( ctx, e->client );
-                else
-                        std::abort();
-        }
-}
-
 TEST( server, one_interaction )
 {
         mem_usage_guard g;
-        uv_loop_t*      loop = uv_default_loop();
 
-        server   server;
-        client   client;
+        server server;
+        client client;
+
+        int fired_counter = 0;
+
+
         test_ctx ctx;
-        int      fired_counter = 0;
+        init_both( ctx.loop, server, client );
 
-        auto h1 = server_client_coro(
-            ctx,
-            loop,
-            server,
-            [&fired_counter]( test_ctx&, server_client& client ) -> ecor::task< void > {
-                    std::array< uint8_t, 4 > buff = { 1, 2, 3, 4 };
-                    spdlog::info( "Starting test transaction" );
-                    auto res = co_await client.transact( buff );
-                    if ( auto* e = std::get_if< cobs_receiver::err >( &res ) )
-                            std::abort();
-                    auto& prom = std::get< cobs_receiver::reply >( res );
+        auto server_client_coro = [&]( test_ctx& ctx ) -> ecor::task< void > {
+                for ( ;; ) {
+                        auto evt = co_await (
+                            ( server.new_event() || server.disc_event() ) | ecor::as_variant );
+                        spdlog::info( "Got event" );
+                        auto* e = std::get_if< server::new_client >( &evt );
+                        if ( !e )
+                                std::abort();
+                        std::array< uint8_t, 4 > buff = { 1, 2, 3, 4 };
+                        spdlog::info( "Starting test transaction" );
+                        auto res = co_await (
+                            e->client.transact( buff ) | ecor::err_to_val | ecor::as_variant );
+                        if ( std::get_if< cobs_receiver::err >( &res ) )
+                                std::abort();
+                        auto& prom = std::get< cobs_receiver::reply >( res );
 
-                    std::array< uint8_t, 4 > expected = { 5, 6, 7, 8 };
-                    EXPECT_EQ( prom.data, std::span< uint8_t const >{ expected } );
-                    ++fired_counter;
-            } );
+                        std::array< uint8_t, 4 > expected = { 5, 6, 7, 8 };
+                        EXPECT_EQ( prom.data, std::span< uint8_t const >{ expected } );
+                        ++fired_counter;
+                }
+        };
+        auto h1 = server_client_coro( ctx ).connect( ecor::_dummy_receiver{} );
+        h1.start();
 
         auto client_coro = [&fired_counter, &client]( test_ctx& ctx ) -> ecor::task< void > {
                 std::array< uint8_t, 4 > buff = { 5, 6, 7, 8 };
-                auto                     res  = co_await client.incoming();
-                if ( auto* e = std::get_if< cobs_receiver::err >( &res ) )
+                auto res = co_await ( client.incoming() | ecor::err_to_val | ecor::as_variant );
+                spdlog::info( "Got incoming data" );
+                if ( std::get_if< cobs_receiver::err >( &res ) )
                         std::abort();
                 auto&                    prom     = std::get< client::promise >( res );
                 std::array< uint8_t, 4 > expected = { 1, 2, 3, 4 };
@@ -196,11 +163,11 @@ TEST( server, one_interaction )
                 std::ignore = prom.fullfill( buff );
                 ++fired_counter;
         };
-        auto h2 = client_coro( ctx );
+        auto h2 = client_coro( ctx ).connect( ecor::_dummy_receiver{} );
+        h2.start();
 
-        init_both( loop, server, client );
 
-        run_loop( loop, 50 );
+        run_loop( ctx.loop, 50 );
 
         EXPECT_EQ( fired_counter, 2 );
 }

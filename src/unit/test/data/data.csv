@@ -1,0 +1,11 @@
+id,name,value,timestamp,status
+1,test_item_1,100,2025-01-01T00:00:00Z,active
+2,test_item_2,200,2025-01-02T00:00:00Z,inactive
+3,test_item_3,300,2025-01-03T00:00:00Z,active
+4,test_item_4,400,2025-01-04T00:00:00Z,pending
+5,test_item_5,500,2025-01-05T00:00:00Z,active
+6,test_item_6,600,2025-01-06T00:00:00Z,completed
+7,test_item_7,700,2025-01-07T00:00:00Z,active
+8,test_item_8,800,2025-01-08T00:00:00Z,inactive
+9,test_item_9,900,2025-01-09T00:00:00Z,pending
+10,test_item_10,1000,2025-01-10T00:00:00Z,active

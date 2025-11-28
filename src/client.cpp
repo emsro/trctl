@@ -4,7 +4,7 @@ namespace trctl
 {
 namespace
 {
-        void client_close( uv_handle_t* handle )
+        void client_close( uv_handle_t* )
         {
                 spdlog::info( "Disconnecting from server" );
                 std::abort();
@@ -12,7 +12,7 @@ namespace
 
         void client_read( uv_stream_t* cl, ssize_t nread, uv_buf_t const* buf )
         {
-                auto& c = (client&) ( *cl );
+                auto& c = *(client*) ( cl->data );
                 if ( nread > 0 )
                         c.recv._handle_rx( { (uint8_t*) buf->base, (std::size_t) nread } );
                 if ( nread < 0 ) {
@@ -24,9 +24,9 @@ namespace
                 free( buf->base );
         }
 
-        void client_alloc( uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf )
+        void client_alloc( uv_handle_t*, size_t suggested_size, uv_buf_t* buf )
         {
-                auto& c = (client&) ( *handle );
+                // auto& c = *(client*) ( handle->data );
                 // XXX: should use memory pool from client instead
                 buf->base = (char*) malloc( suggested_size );
                 buf->len  = suggested_size;
@@ -39,7 +39,7 @@ namespace
                         std::abort();
                 }
                 spdlog::info( "Client connected" );
-                client& c = *(client*) req;
+                client& c = *(client*) req->data;
 
                 uv_read_start( (uv_stream_t*) &c, client_alloc, client_read );
         }
@@ -47,13 +47,13 @@ namespace
 
 int client_init( client& c, uv_loop_t* loop, std::string_view addr, int port )
 {
-        uv_tcp_init( loop, &c );
+        uv_tcp_init( loop, &c.tcp );
 
         struct sockaddr_in dest;
         uv_ip4_addr( addr.data(), port, &dest );
 
         spdlog::info( "Connecting to server on port {}", port );
         return uv_tcp_connect(
-            (uv_connect_t*) &c, (uv_tcp_t*) &c, (const struct sockaddr*) &dest, client_on_connect );
+            &c.connect, &c.tcp, (const struct sockaddr*) &dest, client_on_connect );
 }
 }  // namespace trctl

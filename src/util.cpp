@@ -1,5 +1,7 @@
 #include "util.hpp"
 
+#include <algorithm>
+
 namespace trctl
 {
 
@@ -38,36 +40,38 @@ static inline void cobs_send_write_cb( uv_write_t* req, int status )
                 spdlog::error( "Write error {}\n", uv_strerror( status ) );
         auto* wr = (tcp_send_req*) req;
         auto& m  = wr->mem;
-        m.destroy< tcp_send_req >( *wr );
+        std::destroy_at( wr );
+        m.deallocate( wr, sizeof( tcp_send_req ), alignof( tcp_send_req ) );
 }
 
 send_status cobs_send( circular_buffer_memory& mem, uv_tcp_t* c, std::span< uint8_t const > data )
 {
-        tcp_send_req* wr = mem.construct< tcp_send_req >(
-            make_unique_buffer( mem, 3 + data.size() * 258 / 255 ), mem );
-        auto [succ, used] =
-            encode_cobs( data, std::span< uint8_t >{ wr->buff }.subspan( 0, wr->buff.size() - 1 ) );
+        auto wr_ptr = mem.make< tcp_send_req >(
+            tcp_send_req{ mem.make_span< uint8_t >( 3 + data.size() * 258 / 255 ), mem } );
+        auto [succ, used] = encode_cobs(
+            data, std::span< uint8_t >{ wr_ptr->buff }.subspan( 0, wr_ptr->buff.size() - 1 ) );
         if ( !succ ) {
                 spdlog::error( "COBS encoding failed, message too large" );
                 return send_status::ENCODING_ERROR;
         }
-        wr->buf = uv_buf_init( (char*) used.data(), used.size() + 1 );
-        int r   = uv_write( (uv_write_t*) wr, (uv_stream_t*) c, &wr->buf, 1, cobs_send_write_cb );
+        wr_ptr->buf = uv_buf_init( (char*) used.data(), used.size() + 1 );
+        int r       = uv_write(
+            (uv_write_t*) wr_ptr.get(), (uv_stream_t*) c, &wr_ptr->buf, 1, cobs_send_write_cb );
         if ( r ) {
                 spdlog::error( "uv_write failed: {}", uv_strerror( r ) );
-                delete wr;
                 return send_status::WRITE_ERROR;
         }
 
+        std::ignore = wr_ptr.release();
         return send_status::SUCCESS;
 }
 
 void cobs_receiver::_handle_rx( std::span< uint8_t const > data )
 {
         auto iter = rx_buffer.begin() + rx_used;
-        if ( std::distance( iter, rx_buffer.end() ) < data.size() ) {
+        if ( (std::size_t) std::distance( iter, rx_buffer.end() ) < data.size() ) {
                 spdlog::error(
-                    "Failed to handle RX, message too large: size: {} capacity: {}",
+                    "Failed to handle cobs rx, message too large: size: {} capacity: {}",
                     data.size(),
                     std::distance( iter, rx_buffer.end() ) );
                 std::abort();
@@ -117,8 +121,8 @@ void* operator new( std::size_t sz )
 {
         if ( !trctl::get_guard_memory() )
                 return std::malloc( sz );
-
-        std::abort();
+        //   std::abort();
+        return std::malloc( sz );
 }
 
 void operator delete( void* ptr ) noexcept
@@ -127,5 +131,6 @@ void operator delete( void* ptr ) noexcept
                 std::free( ptr );
                 return;
         }
-        std::abort();
+        //    std::abort();
+        std::free( ptr );
 }

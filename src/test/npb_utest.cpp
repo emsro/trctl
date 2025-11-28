@@ -27,9 +27,10 @@ TEST( npb, base )
             msg,
             file_transfer_start{
                 .filename = (char*) "testfile",
-                .seq      = 42,
+                .folder   = {},
                 .filesize = 12345,
-            } );
+            },
+            42 );
 
         EXPECT_TRUE( pb_encode( &ostream, hub_to_unit_fields, &msg ) );
         hub_to_unit     msg2 = hub_to_unit_init_default;
@@ -41,9 +42,11 @@ TEST( npb, base )
         EXPECT_EQ( msg.ts.sec, msg2.ts.sec );
         EXPECT_EQ( msg.ts.nsec, msg2.ts.nsec );
         EXPECT_EQ( msg.which_sub, msg2.which_sub );
-        EXPECT_EQ( msg.sub.file_transfer_start.seq, msg2.sub.file_transfer_start.seq );
-        EXPECT_EQ( msg.sub.file_transfer_start.filesize, msg2.sub.file_transfer_start.filesize );
-        EXPECT_STREQ( msg.sub.file_transfer_start.filename, msg2.sub.file_transfer_start.filename );
+        EXPECT_EQ( msg.sub.file_transfer.seq, msg2.sub.file_transfer.seq );
+        EXPECT_EQ(
+            msg.sub.file_transfer.sub.start.filesize, msg2.sub.file_transfer.sub.start.filesize );
+        EXPECT_STREQ(
+            msg.sub.file_transfer.sub.start.filename, msg2.sub.file_transfer.sub.start.filename );
 }
 
 }  // namespace trctl

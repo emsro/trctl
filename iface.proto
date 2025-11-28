@@ -6,52 +6,137 @@ option(nanopb_fileopt).include = '<npb_extra.h>';
 message unit{}
 
 message timestamp {
-    int64 sec = 1;
-    int32 nsec = 2;
+    int64 sec = 1; // seconds since epoch
+    int32 nsec = 2; // nanoseconds past the last second
 }
 
+// -----------------------------------------------------------------------------
+
 message init_msg {
-    string mac_addr = 1 [(nanopb).callback_datatype = "char*"]; 
-    string version = 2 [(nanopb).callback_datatype = "char*"];
-    timestamp uptime = 3;
+    string mac_addr = 1 [(nanopb).callback_datatype = "const char*"]; 
+    string version = 2 [(nanopb).callback_datatype = "const char*"];
 }
 
 message file_transfer_start {
-    string filename = 1 [(nanopb).callback_datatype = "char*"];
-    uint64 filesize = 2;
-    uint32 seq = 3;
+    string filename = 1 [(nanopb).callback_datatype = "const char*"];
+    string folder = 2 [(nanopb).max_size = 32 ];
+    uint64 filesize = 3;
 }
 
 message file_transfer_data {
     bytes data = 1 [(nanopb).callback_datatype = "struct npb_data"];
     uint64 offset = 2;
-    uint32 seq = 3;
 }
 
 message file_transfer_end {
+    uint32 fnv1a = 1;
+}
+
+message file_transfer_req{
     uint32 seq = 1;
-    uint32 fnv1a = 2;
+    oneof sub {
+        file_transfer_start start = 2;
+        file_transfer_data data = 3;
+        file_transfer_end end = 4;
+    }
 }
 
 message file_resp {
     bool success = 1;
 }
 
+// -----------------------------------------------------------------------------
+
+message list_folders_req{
+    uint32 offset = 1;
+    uint32 limit = 2;
+};
+
+message list_folders_resp{
+    repeated string entries = 1 [(nanopb).callback_datatype = "struct npb_str*"];
+};
+
+message folder_ctl_req{
+    string folder = 1 [(nanopb).max_size = 32 ];
+
+    oneof sub {
+        unit create = 2;
+        unit del = 3;
+        unit clear = 4;
+    }
+};
+
+message folder_ctl_resp{
+    bool success = 1;
+    string folder = 2 [(nanopb).max_size = 32 ];
+};
+
+// -----------------------------------------------------------------------------
+
+message task_start_req{
+    repeated string args = 3 [(nanopb).callback_datatype = "struct npb_str*"];
+    string folder = 4 [(nanopb).max_size = 32 ];
+}
+
+message task_progress_resp{
+    oneof sub {
+        bytes sout = 1 [(nanopb).callback_datatype = "struct npb_data"];
+        bytes serr = 2 [(nanopb).callback_datatype = "struct npb_data"];
+        int32 exit_status = 3;
+    }
+    uint32 events_left = 4;
+}
+
+message task_req{
+    uint32 task_id = 1;
+    oneof sub {
+        task_start_req start = 2;
+        unit progress = 3;
+        unit cancel = 4;
+    }
+};
+
+message task_resp{
+    uint32 task_id = 1;
+    oneof sub{
+        bool started = 2;
+        task_progress_resp progress = 3;
+        bool canceled = 4;
+    }
+}
+
+message list_tasks_req{
+    int32 offset = 1;
+}
+
+message list_tasks_resp{
+    repeated uint32 tasks = 1 [(nanopb).max_count = 20];
+}
+
+// -----------------------------------------------------------------------------
 
 message unit_to_hub {
     timestamp ts = 1;
+    uint64 req_id = 2;
     oneof sub {
-        init_msg init = 2; 
-        file_resp file_resp = 3;
+        init_msg init = 3; 
+        file_resp file = 4;
+        task_resp task = 5;
+        list_tasks_resp list_tasks = 6;
+        list_folders_resp list_folder = 7;
+        folder_ctl_resp folder_ctl = 8;
     }
 }
 
 message hub_to_unit {
-    timestamp ts = 1 ;
+    timestamp ts = 1;
+    uint64 req_id = 2;
     oneof sub {
-        unit get_init = 2;
-        file_transfer_start file_transfer_start = 3;
-        file_transfer_data file_transfer_data = 4; 
-        file_transfer_end file_transfer_end = 5;
+        unit init = 3;
+        file_transfer_req file_transfer = 4;
+        list_folders_req list_folder = 7;
+        folder_ctl_req folder_ctl = 8;
+        task_req task = 9;
+        list_tasks_req list_tasks = 10;
     }
 }
