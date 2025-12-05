@@ -10,12 +10,12 @@ message timestamp {
     int32 nsec = 2; // nanoseconds past the last second
 }
 
-// -----------------------------------------------------------------------------
-
 message init_msg {
     string mac_addr = 1 [(nanopb).callback_datatype = "const char*"]; 
     string version = 2 [(nanopb).callback_datatype = "const char*"];
 }
+
+// -----------------------------------------------------------------------------
 
 message file_transfer_start {
     string filename = 1 [(nanopb).callback_datatype = "const char*"];
