@@ -68,35 +68,9 @@ send_status cobs_send( circular_buffer_memory& mem, uv_tcp_t* c, std::span< uint
 
 void cobs_receiver::_handle_rx( std::span< uint8_t const > data )
 {
-        auto iter = rx_buffer.begin() + rx_used;
-        if ( (std::size_t) std::distance( iter, rx_buffer.end() ) < data.size() ) {
-                spdlog::error(
-                    "Failed to handle cobs rx, message too large: size: {} capacity: {}",
-                    data.size(),
-                    std::distance( iter, rx_buffer.end() ) );
-                std::abort();
-                // XXX: improve
-        }
-        std::copy_n( data.begin(), data.size(), iter );
-        rx_used += data.size();
-        for ( ;; ) {
-                auto buff = std::span{ rx_buffer }.subspan( 0, rx_used );
-                auto iter = std::ranges::find( buff, 0x00u );
-                if ( iter == buff.end() )
-                        break;
-
-                auto n = std::distance( buff.begin(), iter );
-
-                auto msg = buff.subspan( 0, n );
-
-                auto [succ, used] = decode_cobs( msg, msg );
-                std::ignore       = succ;  // assert?
-
-                recv_src.set_value( reply{ .data = used } );
-
-                std::copy( iter + 1, buff.end(), rx_buffer.begin() );
-                rx_used = std::distance( iter + 1, buff.end() );
-        }
+        _handle_rx( data, [&]( std::span< uint8_t const > d ) {
+                recv_src.set_value( reply{ .data = d } );
+        } );
 }
 
 auto& get_guard_memory()

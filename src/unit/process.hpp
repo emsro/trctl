@@ -145,6 +145,7 @@ struct proc : zll::ll_base< proc >
         template < bool is_err >
         static void on_msg( uv_stream_t* stream, ssize_t nread, uv_buf_t const* buf )
         {
+                spdlog::debug( "Received message on stream: {} bytes", nread );
                 if ( nread < 0 ) {
                         if ( nread != UV_EOF )
                                 spdlog::error( "Read error {}", uv_err_name( nread ) );
@@ -267,12 +268,12 @@ task< void > task_start(
         auto [it, inserted] = ctx.procs.try_emplace( task_id, tctx.loop, ctx.finished_procs );
         if ( !inserted ) {
                 spdlog::error( "Task with ID {} already exists", task_id );
-                co_await error::input_error;
+                co_yield ecor::with_error{ error::input_error };
         }
         proc& p = it->second;
         if ( !p.start( binary, cwd, args.data() ) ) {
                 ctx.procs.erase( it );
-                co_await error::libuv_error;
+                co_yield ecor::with_error{ error::libuv_error };
         }
         spdlog::debug( "Task with ID {} started", task_id );
 }
@@ -289,9 +290,11 @@ task< progress_report > task_progress( auto&, proc_ctx& ctx, uint32_t task_id )
         auto it = ctx.procs.find( task_id );
         if ( it == ctx.procs.end() ) {
                 spdlog::error( "Task with ID {} not found", task_id );
-                co_await error::input_error;
+                co_yield ecor::with_error{ error::input_error };
         }
         proc& p = it->second;
+
+        spdlog::debug( "Task with ID {} progress requested", task_id );
 
         if ( p.stream.exit_status().has_value() ) {
                 co_return progress_report{
@@ -299,12 +302,7 @@ task< progress_report > task_progress( auto&, proc_ctx& ctx, uint32_t task_id )
                 };
         }
         auto dq = co_await p.stream.deque();
-
-        if ( auto* x = std::get_if< proc_stream::exit_evt >( &dq ) ) {
-                co_return progress_report{
-                    .event = proc_stream::exit_evt{ x->exit_status },
-                };
-        } else if ( auto* x = std::get_if< proc_stream::stdout_evt >( &dq ) ) {
+        if ( auto* x = std::get_if< proc_stream::stdout_evt >( &dq ) ) {
                 co_return progress_report{
                     .event = proc_stream::stdout_evt{ std::move( x->mem ) },
                 };
@@ -313,8 +311,12 @@ task< progress_report > task_progress( auto&, proc_ctx& ctx, uint32_t task_id )
                     .event = proc_stream::stderr_evt{ std::move( x->mem ) },
                 };
         }
-
-        co_await error::internal_error;
+        auto* x = std::get_if< proc_stream::exit_evt >( &dq );
+        if ( !x )
+                co_yield ecor::with_error{ error::internal_error };
+        co_return progress_report{
+            .event = proc_stream::exit_evt{ x->exit_status },
+        };
 }
 
 task< void > task_cancel( auto& tctx, proc_ctx& ctx, uint32_t task_id )
@@ -322,13 +324,24 @@ task< void > task_cancel( auto& tctx, proc_ctx& ctx, uint32_t task_id )
         auto it = ctx.procs.find( task_id );
         if ( it == ctx.procs.end() ) {
                 spdlog::error( "Task with ID {} not found", task_id );
-                co_await error::input_error;
+                co_yield ecor::with_error{ error::input_error };
         }
         proc& p = it->second;
         spdlog::info( "Cancelling task ID {}", task_id );
         co_await proc::kill( tctx, p );
         ctx.procs.erase( it );
         co_return;
+}
+
+task< std::span< uint32_t > >
+task_list( auto&, proc_ctx& ctx, uint32_t offset, std::span< uint32_t > out )
+{
+        auto iter = ctx.procs.begin();
+        std::advance( iter, std::min( (size_t) offset, ctx.procs.size() ) );
+        size_t count = 0;
+        for ( ; iter != ctx.procs.end() && count < out.size(); ++iter, ++count )
+                out[count] = iter->first;
+        co_return out.subspan( 0, count );
 }
 
 }  // namespace trctl

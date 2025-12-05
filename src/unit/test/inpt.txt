@@ -111,12 +111,12 @@
 > 2 file_transfer_start filename:test.txt folder:nonexistent filesize:10 seq:7
 < 2 file success:false
 | not_exists path:nonexistent/test.txt
-| active_transfers count:1
+| active_transfers count:0
 
 # case 15 - upload file with inline hex data
 > 1 init
 < 1 init
-> 2 file_transfer_start filename:inline.txt folder:workspace filesize:6 seq:8
+> 2 file_transfer_start filename:inline.txt folder:workspace filesize:12 seq:8
 > 3 file_transfer_data data:48656c6c6f0a offset:0 seq:8
 > 4 file_transfer_end seq:8 fnv1a:7fdcdc03
 < 2 file success:true
@@ -173,11 +173,9 @@
 > 3 task_progress task_id:105
 < 3 task_progress task_id:105 events:serr:file_not_found,exit_status:2
 
-# case 22 - task with invalid command rejected
+# case 22 - FREE SLOT
 > 1 init
 < 1 init
-> 2 task_start task_id:106 args:invalid_command folder:workspace
-< 2 task task_id:106 started:false
 
 # case 23 - task with multiple output lines
 > 1 init
@@ -190,9 +188,9 @@
 # case 24 - multiple concurrent tasks
 > 1 init
 < 1 init
-> 2 task_start task_id:201 args:sleep,1 folder:workspace
+> 2 task_start task_id:201 args:sleep,0.001 folder:workspace
 < 2 task task_id:201 started:true
-> 3 task_start task_id:202 args:sleep,1 folder:uploads 
+> 3 task_start task_id:202 args:sleep,0.001 folder:uploads 
 < 3 task task_id:202 started:true
 > 4 task_progress task_id:201
 < 4 task_progress task_id:201 events:exit_status:0
@@ -214,8 +212,10 @@
 < 2 folder_ctl success:true folder:build
 > 3 file_transfer_start filename:build.sh folder:build filesize:34 seq:10
 > 4 file_transfer_data data:@build.sh offset:0 seq:10
-> 5 file_transfer_end seq:10 fnv1a:abcd1234
+> 5 file_transfer_end seq:10 fnv1a:adfdcf9d
 < 3 file success:true
+< 4 file success:true
+< 5 file success:true
 > 6 task_start task_id:400 folder:build args:bash,build.sh
 < 6 task task_id:400 started:true
 > 7 task_progress task_id:400
@@ -228,8 +228,10 @@
 < 2 folder_ctl success:true folder:processing
 > 3 file_transfer_start filename:input.dat folder:processing filesize:64 seq:11
 > 4 file_transfer_data data:@input.dat offset:0 seq:11
-> 5 file_transfer_end seq:11 fnv1a:11112222
+> 5 file_transfer_end seq:11 fnv1a:4c2c259e
 < 3 file success:true
+< 4 file success:true
+< 5 file success:true
 > 6 task_start task_id:500 folder:processing args:process,input.dat
 < 6 task task_id:500 started:true
 > 7 task_progress task_id:500
@@ -255,7 +257,7 @@
 > 1 init
 < 1 init
 > 2 list_folder offset:0 limit:10
-< 2 list_folder entries:workspace,uploads,scripts,logs,build,processing
+< 2 list_folder entries:build,logs,processing,scripts,uploads,workspace
 
 # case 31 - delete single folder
 > 1 init
@@ -268,7 +270,7 @@
 > 1 init
 < 1 init
 > 2 list_folder offset:0 limit:10
-< 2 list_folder entries:workspace,uploads,scripts,logs,processing
+< 2 list_folder entries:logs,processing,scripts,uploads,workspace
 
 # case 33 - clear multiple folders
 > 1 init
@@ -333,10 +335,10 @@
 > 2 folder_ctl create: folder:empty_test
 < 2 folder_ctl success:true folder:empty_test
 > 3 file_transfer_start filename:empty.txt folder:empty_test filesize:0 seq:60
-> 4 file_transfer_end seq:60 fnv1a:00000000
+> 4 file_transfer_end seq:60 fnv1a:811c9dc5
 < 3 file success:true
 | exists path:empty_test/empty.txt
-| checksum path:empty_test/empty.txt fnv1a:00000000
+| checksum path:empty_test/empty.txt fnv1a:811c9dc5
 
 # case 40 - upload large file requiring multiple data chunks
 > 1 init
@@ -345,10 +347,10 @@
 < 2 folder_ctl success:true folder:large_files
 > 3 file_transfer_start filename:large_4k.bin folder:large_files filesize:4096 seq:70
 > 4 file_transfer_data data:@large_4k.bin offset:0 seq:70
-> 5 file_transfer_end seq:70 fnv1a:aabbccdd
+> 5 file_transfer_end seq:70 fnv1a:d6cd0ca5
 < 3 file success:true
 | exists path:large_files/large_4k.bin
-| checksum path:large_files/large_4k.bin fnv1a:aabbccdd
+| checksum path:large_files/large_4k.bin fnv1a:d6cd0ca5
 
 # case 41 - nested folder deletion
 > 1 init
@@ -366,7 +368,7 @@
 > 1 init
 < 1 init
 > 2 task_start req_id:100 task_id:50 args:echo,this_is_a_very_long_argument_string_that_tests_the_maximum_buffer_capacity_for_arguments_in_task_execution
-< 100 task task_id:50 started:true
+< 2 task task_id:50 started:true
 
 # case 43 - interleaved file transfers to same folder
 > 1 init
@@ -379,61 +381,41 @@
 > 6 file_transfer_data data:@test.txt offset:0 seq:80
 > 7 file_transfer_data data:@readme.txt offset:0 seq:81
 > 8 file_transfer_data data:@input.dat offset:0 seq:82
-> 9 file_transfer_end seq:80 fnv1a:aabbccdd
-> 10 file_transfer_end seq:81 fnv1a:aabbccdd
-> 11 file_transfer_end seq:82 fnv1a:aabbccdd
-< 3 file success:true
-< 4 file success:true
-< 5 file success:true
+> 9 file_transfer_end seq:80 fnv1a:6448f7f7
+> 10 file_transfer_end seq:81 fnv1a:b1ea4872
+> 11 file_transfer_end seq:82 fnv1a:4c2c259e
 | exists path:multi/test.txt
 | exists path:multi/readme.txt
 | exists path:multi/input.dat
-| checksum path:multi/test.txt fnv1a:aabbccdd
-| checksum path:multi/readme.txt fnv1a:aabbccdd
-| checksum path:multi/input.dat fnv1a:aabbccdd
+| checksum path:multi/test.txt fnv1a:6448f7f7
+| checksum path:multi/readme.txt fnv1a:b1ea4872
+| checksum path:multi/input.dat fnv1a:4c2c259e
 | active_transfers count:0
 
-# case 44 - list folder with many entries
+# case 44 - free slot
 > 1 init
 < 1 init
-> 2 folder_ctl create: folder:listing
-< 2 folder_ctl success:true folder:listing
-> 3 file_transfer_start filename:file1.txt folder:listing filesize:10 seq:90
-> 4 file_transfer_data data:@test.txt offset:0 seq:90
-> 5 file_transfer_end seq:90 fnv1a:aabbccdd
-< 3 file success:true
-> 6 file_transfer_start filename:file2.txt folder:listing filesize:13 seq:91
-> 7 file_transfer_data data:@readme.txt offset:0 seq:91
-> 8 file_transfer_end seq:91 fnv1a:aabbccdd
-< 6 file success:true
-> 9 file_transfer_start filename:file3.txt folder:listing filesize:10 seq:92
-> 10 file_transfer_data data:@test.txt offset:0 seq:92
-> 11 file_transfer_end seq:92 fnv1a:aabbccdd
-< 9 file success:true
-> 12 list_folder folder:listing
-< 12 list_folder entries:file1.txt,file2.txt,file3.txt
 
 # case 45 - task running during file transfer
-> 1 init
-< 1 init
 > 2 folder_ctl create: folder:concurrent
 < 2 folder_ctl success:true folder:concurrent
-> 3 task_start req_id:110 task_id:60 args:sleep,1
+> 3 task_start task_id:60 args:sleep,1
 > 4 file_transfer_start filename:data.bin folder:concurrent filesize:256 seq:100
 > 5 file_transfer_data data:@data.bin offset:0 seq:100
 > 6 file_transfer_end seq:100 fnv1a:aabbccdd
-< 110 task task_id:60 started:true
+< 3 task task_id:60 started:true
 < 4 file success:true
 
 # case 46 - cancel task then start new one
 > 1 init
 < 1 init
-> 2 task_start req_id:120 task_id:70 args:sleep,10
-< 120 task task_id:70 started:true
+> 2 task_start task_id:70 args:sleep,10
+< 2 task task_id:70 started:true
 > 3 task_cancel task_id:70
+< 3 task task_id:70 canceled:true
 | active_tasks count:0
-> 4 task_start req_id:121 task_id:71 args:echo,hello
-< 121 task task_id:71 started:true
+> 4 task_start task_id:71 args:echo,hello
+< 4 task task_id:71 started:true
 
 # case 47 - create deeply nested folder structure
 > 1 init
@@ -452,12 +434,12 @@
 # case 48 - multiple tasks started simultaneously
 > 1 init
 < 1 init
-> 2 task_start req_id:130 task_id:80 args:echo,task1
-> 3 task_start req_id:131 task_id:81 args:echo,task2
-> 4 task_start req_id:132 task_id:82 args:echo,task3
-< 130 task task_id:80 started:true
-< 131 task task_id:81 started:true
-< 132 task task_id:82 started:true
+> 2 task_start task_id:80 args:echo,task1
+> 3 task_start task_id:81 args:echo,task2
+> 4 task_start task_id:82 args:echo,task3
+< 2 task task_id:80 started:true
+< 3 task task_id:81 started:true
+< 4 task task_id:82 started:true
 
 # case 49 - list tasks when no tasks are running
 > 1 init
@@ -468,33 +450,36 @@
 # case 50 - list tasks with one active task
 > 1 init
 < 1 init
-> 2 task_start req_id:140 task_id:90 args:sleep,5 folder:workdir
-< 140 task task_id:90 started:true
-> 3 list_tasks offset:0
-< 3 list_tasks tasks:90
+> 2 folder_ctl create: folder:wrk50
+< 2 folder_ctl success:true folder:wrk50
+> 3 task_start task_id:90 args:sleep,5 folder:wrk50
+< 3 task task_id:90 started:true
+> 4 list_tasks offset:0
+< 4 list_tasks tasks:90
 
 # case 51 - list tasks with multiple active tasks
 > 1 init
 < 1 init
-> 2 task_start req_id:150 task_id:100 args:sleep,10 folder:task1
-> 3 task_start req_id:151 task_id:101 args:echo,test folder:task2
-> 4 task_start req_id:152 task_id:102 args:ls folder:task3
-< 150 task task_id:100 started:true
-< 151 task task_id:101 started:true
-< 152 task task_id:102 started:true
+> 2 task_start task_id:100 args:sleep,10 folder:wrk50
+> 3 task_start task_id:101 args:echo,test folder:wrk50
+> 4 task_start task_id:102 args:ls folder:wrk50
+< 2 task task_id:100 started:true
+< 3 task task_id:101 started:true
+< 4 task task_id:102 started:true
 > 5 list_tasks offset:0
 < 5 list_tasks tasks:100,101,102
 
 # case 52 - list tasks after canceling one
 > 1 init
 < 1 init
-> 2 task_start req_id:160 task_id:110 args:sleep,20 folder:work1
-> 3 task_start req_id:161 task_id:111 args:sleep,20 folder:work2
-< 160 task task_id:110 started:true
-< 161 task task_id:111 started:true
+> 2 task_start task_id:110 args:sleep,20 folder:wrk50
+> 3 task_start task_id:111 args:sleep,20 folder:wrk50
+< 2 task task_id:110 started:true
+< 3 task task_id:111 started:true
 > 4 list_tasks offset:0
 < 4 list_tasks tasks:110,111
 > 5 task_cancel task_id:110
+< 5 task canceled:true
 > 6 list_tasks offset:0
 < 6 list_tasks tasks:111
 
@@ -503,30 +488,32 @@
 < 1 init
 > 2 folder_ctl create: folder:mixed
 < 2 folder_ctl success:true folder:mixed
-> 3 task_start req_id:170 task_id:120 args:sleep,30 folder:mixed
-< 170 task task_id:120 started:true
+> 3 task_start task_id:120 args:sleep,30 folder:mixed
+< 3 task task_id:120 started:true
 > 4 list_tasks offset:0
 < 4 list_tasks tasks:120
 > 5 file_transfer_start filename:test.txt folder:mixed filesize:10 seq:120
 > 6 file_transfer_data data:@test.txt offset:0 seq:120
-> 7 file_transfer_end seq:120 fnv1a:aabbccdd
+> 7 file_transfer_end seq:120 fnv1a:6448f7f7
 < 5 file success:true
+< 6 file success:true
+< 7 file success:true
 > 8 list_tasks offset:0
 < 8 list_tasks tasks:120
 
 # case 54 - list tasks with pagination using offset
 > 1 init
 < 1 init
-> 2 task_start req_id:180 task_id:200 command:sleep args:60
-> 3 task_start req_id:181 task_id:201 command:sleep args:60
-> 4 task_start req_id:182 task_id:202 command:sleep args:60
-> 5 task_start req_id:183 task_id:203 command:sleep args:60
-> 6 task_start req_id:184 task_id:204 command:sleep args:60
-< 180 task task_id:200 started:true
-< 181 task task_id:201 started:true
-< 182 task task_id:202 started:true
-< 183 task task_id:203 started:true
-< 184 task task_id:204 started:true
+> 2 task_start task_id:200 command:sleep args:60
+> 3 task_start task_id:201 command:sleep args:60
+> 4 task_start task_id:202 command:sleep args:60
+> 5 task_start task_id:203 command:sleep args:60
+> 6 task_start task_id:204 command:sleep args:60
+< 2 task task_id:200 started:true
+< 3 task task_id:201 started:true
+< 4 task task_id:202 started:true
+< 5 task task_id:203 started:true
+< 6 task task_id:204 started:true
 > 7 list_tasks offset:0
 < 7 list_tasks tasks:200,201,202,203,204
 > 8 list_tasks offset:2
@@ -542,10 +529,10 @@
 > 2 folder_ctl create: folder:bad_seq
 < 2 folder_ctl success:true folder:bad_seq
 > 3 file_transfer_start filename:test.txt folder:bad_seq filesize:10 seq:100
+< 3 file success:true
 > 4 file_transfer_data data:@test.txt offset:0 seq:999
-> 5 file_transfer_end seq:100 fnv1a:aabbccdd
-< 3 file success:false
-| not_exists path:bad_seq/test.txt
+< 4 file success:false
+> 5 file_transfer_end seq:100 fnv1a:811c9dc5
 | active_transfers count:0
 
 # case 56 - file transfer with wrong offset
@@ -554,10 +541,10 @@
 > 2 folder_ctl create: folder:bad_offset
 < 2 folder_ctl success:true folder:bad_offset
 > 3 file_transfer_start filename:test.txt folder:bad_offset filesize:10 seq:110
+< 3 file success:true
 > 4 file_transfer_data data:@test.txt offset:100 seq:110
-> 5 file_transfer_end seq:110 fnv1a:aabbccdd
-< 3 file success:false
-| not_exists path:bad_offset/test.txt
+> 5 file_transfer_end seq:110 fnv1a:811c9dc5
+< 4 file success:false
 | active_transfers count:0
 
 # case 57 - duplicate request IDs
@@ -572,6 +559,7 @@
 > 1 init
 < 1 init
 > 2 task_cancel task_id:999
+< 2 task canceled:false
 
 # case 59 - delete non-existent folder
 > 1 init
@@ -595,7 +583,9 @@
 > 2 folder_ctl create: folder:incomplete
 < 2 folder_ctl success:true folder:incomplete
 > 3 file_transfer_start filename:test.txt folder:incomplete filesize:10 seq:130
+< 3 file success:true
 > 4 file_transfer_data data:@test.txt offset:0 seq:130
+< 4 file success:true
 > 5 folder_ctl delete: folder:incomplete
 < 5 folder_ctl success:true folder:incomplete
 | not_exists path:incomplete

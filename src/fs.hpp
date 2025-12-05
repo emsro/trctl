@@ -531,6 +531,8 @@ struct _fs_rm_rf
           , path( path )
           , dirs( dirs )
         {
+                if ( path.end() != '/' )
+                        this->path = this->path( "/" );
         }
 
         fs_rm_rf_buff_entry* p = nullptr;

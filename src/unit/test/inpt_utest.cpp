@@ -438,6 +438,8 @@ struct inpt_test : public ::testing::Test
         uv_tcp_t server;
         uv_tcp_t server_client;
 
+        uint8_t                              recv_buffer[1024 * 8];
+        cobs_receiver                        recv{ recv_buffer };
         std::deque< std::vector< uint8_t > > received_messages;
 
         uint8_t client_buffer[4096 + 128];
@@ -458,11 +460,10 @@ struct inpt_test : public ::testing::Test
 
                 auto& test = *(inpt_test*) cl->data;
                 if ( nread > 0 ) {
-                        std::span data    = { (uint8_t*) buf->base, (std::size_t) nread };
-                        auto [succ, used] = decode_cobs( data, data );
-                        if ( used.back() == 0x00 )
-                                used = used.subspan( 0, used.size() - 1 );
-                        test.received_messages.emplace_back( used.begin(), used.end() );
+                        std::span data = { (uint8_t*) buf->base, (std::size_t) nread };
+                        test.recv._handle_rx( data, [&]( std::span< uint8_t > data ) {
+                                test.received_messages.emplace_back( data.begin(), data.end() );
+                        } );
                 }
 
                 free( buf->base );
@@ -471,6 +472,7 @@ struct inpt_test : public ::testing::Test
 
         void SetUp() override
         {
+                SCOPED_TRACE( "case " + tc->title );
                 sockaddr_in addr;
                 uv_tcp_init( ctx.loop, &server );
                 uv_ip4_addr( "0.0.0.0", 0, &addr );
@@ -515,7 +517,7 @@ struct inpt_test : public ::testing::Test
         void TearDown() override
         {
                 ctx.stop.request_stop();
-                run_loop( ctx.loop, 10 );
+                run_loop( ctx.loop, 128 );
 
                 uv_run( ctx.loop, UV_RUN_ONCE );
         }
@@ -523,6 +525,7 @@ struct inpt_test : public ::testing::Test
 
         void TestBody() override
         {
+                SCOPED_TRACE( "case " + tc->title );
                 for ( auto const& cmd : tc->commands ) {
                         std::visit(
                             [&]( auto const& c ) {
@@ -533,7 +536,7 @@ struct inpt_test : public ::testing::Test
         }
 
 private:
-        uint8_t                buffer1[1024 * 4], buffer2[1024 * 4];
+        uint8_t                buffer1[1024 * 8], buffer2[1024 * 8];
         char                   filename_buffer[256];
         circular_buffer_memory mem2{ std::span{ buffer2 } };
 
@@ -735,7 +738,7 @@ private:
 
         unit_to_hub receive_message()
         {
-                for ( std::size_t i = 0; i < 100; ++i ) {
+                for ( std::size_t i = 0; i < 1024; ++i ) {
                         uv_run( ctx.loop, UV_RUN_NOWAIT );
                         if ( !received_messages.empty() )
                                 break;
@@ -752,6 +755,10 @@ private:
                 unit_to_hub     msg     = {};
 
                 if ( !pb_decode( &istream, unit_to_hub_fields, &msg ) ) {
+                        spdlog::debug(
+                            "Error decoding message: {} bytes {}",
+                            rawmsg.size(),
+                            std::vector< int >{ rawmsg.begin(), rawmsg.end() } );
                         ADD_FAILURE() << "Error receiving message: " << PB_GET_ERROR( &istream );
                         return {};
                 }
@@ -988,7 +995,7 @@ private:
                 }
                 case executor_command::kind::folder_empty: {
 
-                        auto path = workfolder / get_path( cmd );
+                        auto path = get_path( cmd );
 
                         std::filesystem::path full_path = workfolder / path;
                         if ( !std::filesystem::exists( full_path ) ) {

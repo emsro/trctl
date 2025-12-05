@@ -100,8 +100,8 @@ struct component : task_ctx, zll::ll_base< component >
                     } );
         }
 
-        virtual void         tick()     = 0;
         virtual task< void > shutdown() = 0;
+        virtual void         tick()     = 0;
 
         ~component()
         {
@@ -150,8 +150,13 @@ struct task_slots : comp_buff, component
                 spdlog::info( "Shutting down task slots" );
                 while ( !_slots.empty() )
                         co_await _slots.front().shutdown();
-                clear_slots( _finished_slots );
+                clear_slots( _slots );
                 co_return;
+        }
+
+        ~task_slots()
+        {
+                clear_slots( _finished_slots );
         }
 
 private:
@@ -170,12 +175,14 @@ private:
 template < std::size_t N, std::size_t M >
 struct task_slot : task_ctx, zll::ll_base< task_slot< N, M > >
 {
-        uint8_t tctx_buffer[N];
-        uint8_t mem_buffer[M];
+        uint8_t             tctx_buffer[N];
+        uint8_t             mem_buffer[M];
+        task_slots< N, M >* slots;
 
         task_slot( uv_loop_t* loop, task_slots< N, M >& slots, auto&& f )
           : task_ctx( loop, slots.core, tctx_buffer )
-          , op( f( *this, mem_buffer ).connect( _recv{ this, slots } ) )
+          , slots( &slots )
+          , op( f( *this, mem_buffer ).connect( _recv{ this } ) )
         {
         }
 
@@ -183,22 +190,21 @@ struct task_slot : task_ctx, zll::ll_base< task_slot< N, M > >
         {
                 using receiver_concept = ecor::receiver_t;
 
-                task_slot*          slot;
-                task_slots< N, M >& slots;
+                task_slot* slot;
 
                 void set_value() noexcept
                 {
-                        slots.slot_finished( *slot );
+                        slot->finished();
                 }
 
                 void set_error( auto&& ) noexcept
                 {
-                        slots.slot_finished( *slot );
+                        slot->finished();
                 }
 
                 void set_stopped() noexcept
                 {
-                        slots.slot_finished( *slot );
+                        slot->finished();
                 }
         };
 
@@ -207,9 +213,16 @@ struct task_slot : task_ctx, zll::ll_base< task_slot< N, M > >
                 op.start();
         }
 
+        void finished()
+        {
+                if ( slots )
+                        slots->slot_finished( *this );
+        }
+
         task< void > shutdown()
         {
                 spdlog::info( "Shutting down task slot" );
+                slots = nullptr;
                 stop.request_stop();
                 for ( std::size_t i = 0; i < 100; ++i )
                         uv_run( loop, UV_RUN_NOWAIT );

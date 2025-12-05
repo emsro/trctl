@@ -32,6 +32,11 @@ struct fixed_str
                         return { path, pp - 1 };
                 }
 
+                char end()
+                {
+                        return *p;
+                }
+
                 void set_end()
                 {
                         *p = '\0';

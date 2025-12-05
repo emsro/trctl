@@ -2,6 +2,7 @@
 
 #include "cobs.hpp"
 
+#include <algorithm>
 #include <ecor/ecor.hpp>
 #include <map>
 #include <set>
@@ -81,9 +82,43 @@ enum class [[nodiscard]] send_status
 
 send_status cobs_send( circular_buffer_memory& mem, uv_tcp_t* c, std::span< uint8_t const > data );
 
+
 struct cobs_receiver
 {
         void _handle_rx( std::span< uint8_t const > data );
+
+        void _handle_rx( std::span< uint8_t const > data, auto&& f )
+        {
+                auto iter = rx_buffer.begin() + rx_used;
+                if ( (std::size_t) std::distance( iter, rx_buffer.end() ) < data.size() ) {
+                        spdlog::error(
+                            "Failed to handle cobs rx, message too large: size: {} capacity: {}",
+                            data.size(),
+                            std::distance( iter, rx_buffer.end() ) );
+                        std::abort();
+                        // XXX: improve
+                }
+                std::copy_n( data.begin(), data.size(), iter );
+                rx_used += data.size();
+                for ( ;; ) {
+                        auto buff = std::span{ rx_buffer }.subspan( 0, rx_used );
+                        auto iter = std::ranges::find( buff, 0x00u );
+                        if ( iter == buff.end() )
+                                break;
+
+                        auto n = std::distance( buff.begin(), iter );
+
+                        auto msg = buff.subspan( 0, n );
+
+                        auto [succ, used] = decode_cobs( msg, msg );
+                        std::ignore       = succ;  // assert?
+
+                        f( used );
+
+                        std::copy( iter + 1, buff.end(), rx_buffer.begin() );
+                        rx_used = std::distance( iter + 1, buff.end() );
+                }
+        }
 
         struct reply
         {

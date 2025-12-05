@@ -91,23 +91,38 @@ inline task< unit_to_hub > on_msg(
 
                         static constexpr std::size_t n = 128;
 
-                        auto sp = mem.make_span< char >( n );
-                        std::snprintf(
-                            sp.data(),
-                            n,
-                            "%s/%s/%s",
-                            fctx.workdir.string().c_str(),
-                            sub.folder,
-                            sub.filename );
-
-                        auto opt_err = co_await (
-                            start_transfer( ctx, fctx, ftr.seq, sp.data(), sub.filesize ) |
-                            ecor::sink_err );
-                        if ( opt_err )
-                                spdlog::error( "Error during start transfer" );
                         reply           = prepare_reply( ctx.loop, msg.req_id );
                         reply.which_sub = unit_to_hub_file_tag;
-                        reply.sub.file  = file_resp{ .success = !opt_err };
+
+                        auto iter = folctx.flds.find( sub.folder );
+                        if ( iter == folctx.flds.end() ) {
+                                spdlog::error( "Folder '{}' not found", sub.folder );
+                                reply.sub.file = file_resp{ .success = false };
+
+                        } else {
+
+                                auto sp = mem.make_span< char >( n );
+                                std::snprintf(
+                                    sp.data(),
+                                    n,
+                                    "%s/%s/%s",
+                                    fctx.workdir.string().c_str(),
+                                    sub.folder,
+                                    sub.filename );
+
+                                auto opt_err = co_await (
+                                    start_transfer(
+                                        ctx,
+                                        fctx,
+                                        ftr.seq,
+                                        sp.data(),
+                                        sub.filesize,
+                                        iter->second.deps ) |
+                                    ecor::sink_err );
+                                if ( opt_err )
+                                        spdlog::error( "Error during start transfer" );
+                                reply.sub.file = file_resp{ .success = !opt_err };
+                        }
                         break;
                 }
                 case file_transfer_req_data_tag: {
@@ -160,10 +175,10 @@ inline task< unit_to_hub > on_msg(
 
                         std::array< char*, 32 > args;
                         std::size_t             i = 0;
-                        args[i++]                 = "--login";
-                        args[i++]                 = "-c";
-                        args[i++]                 = "exec \"$@\"";
-                        args[i++]                 = "--";
+                        args[i++]                 = (char*) "--login";
+                        args[i++]                 = (char*) "-c";
+                        args[i++]                 = (char*) "exec \"$@\"";
+                        args[i++]                 = (char*) "--";
                         for ( npb_str* p = sub.args; p != nullptr && i < args.size() - 1;
                               p          = p->next ) {
                                 // XXX: dropping const qualifier, fix in near future
@@ -181,9 +196,10 @@ inline task< unit_to_hub > on_msg(
                         std::snprintf(
                             sp.data(), n, "%s/%s", fctx.workdir.string().c_str(), sub.folder );
 
-                        co_await task_start(
-                            ctx, pctx, treq.task_id, "/bin/bash", sp.data(), args );
-
+                        auto opt_err = co_await (
+                            task_start( ctx, pctx, treq.task_id, "/bin/bash", sp.data(), args ) |
+                            ecor::sink_err );
+                        res.sub.started = !opt_err;
 
                         reply           = prepare_reply( ctx.loop, msg.req_id );
                         reply.which_sub = unit_to_hub_task_tag;
@@ -198,21 +214,32 @@ inline task< unit_to_hub > on_msg(
                         res.which_sub    = task_resp_progress_tag;
                         res.sub.progress = task_progress_resp{};
 
-                        auto  progress = co_await task_progress( ctx, pctx, treq.task_id );
-                        auto& evt      = progress.event;
-                        if ( auto* x = std::get_if< proc_stream::exit_evt >( &evt ) ) {
-                                res.sub.progress.which_sub = task_progress_resp_exit_status_tag;
-                                res.sub.progress.sub.exit_status = x->exit_status;
-                        } else if ( auto* x = std::get_if< proc_stream::stdout_evt >( &evt ) ) {
-                                res.sub.progress.which_sub = task_progress_resp_sout_tag;
-                                auto& s                    = res.sub.progress.sub.sout;
-                                s                          = copy( mem, x->mem );
-                        } else if ( auto* x = std::get_if< proc_stream::stderr_evt >( &evt ) ) {
-                                res.sub.progress.which_sub = task_progress_resp_serr_tag;
-                                auto& s                    = res.sub.progress.sub.serr;
-                                s                          = copy( mem, x->mem );
+                        // XXX: error handling
+                        auto r = co_await (
+                            task_progress( ctx, pctx, treq.task_id ) | ecor::err_to_val |
+                            ecor::as_variant );
+                        if ( auto* progress = std::get_if< progress_report >( &r ) ) {
+                                auto& evt = progress->event;
+                                if ( auto* x = std::get_if< proc_stream::exit_evt >( &evt ) ) {
+                                        res.sub.progress.which_sub =
+                                            task_progress_resp_exit_status_tag;
+                                        res.sub.progress.sub.exit_status = x->exit_status;
+                                } else if (
+                                    auto* x = std::get_if< proc_stream::stdout_evt >( &evt ) ) {
+                                        res.sub.progress.which_sub = task_progress_resp_sout_tag;
+                                        auto& s                    = res.sub.progress.sub.sout;
+                                        s                          = copy( mem, x->mem );
+                                } else if (
+                                    auto* x = std::get_if< proc_stream::stderr_evt >( &evt ) ) {
+                                        res.sub.progress.which_sub = task_progress_resp_serr_tag;
+                                        auto& s                    = res.sub.progress.sub.serr;
+                                        s                          = copy( mem, x->mem );
+                                }
+                                res.sub.progress.events_left = progress->events_n;
+                        } else {
+                                // XXX: we do not really know what ot do otherwise
+                                std::abort();
                         }
-                        res.sub.progress.events_left = progress.events_n;
 
                         spdlog::info(
                             "Reporting {} events left for task ID {} with subkind {}",
@@ -228,7 +255,12 @@ inline task< unit_to_hub > on_msg(
                         spdlog::info( "Cancel request for task ID {}", treq.task_id );
 
                         task_resp res;
-                        res.task_id = treq.task_id;
+                        res.task_id   = treq.task_id;
+                        res.which_sub = task_resp_canceled_tag;
+
+                        auto opt_err =
+                            co_await ( task_cancel( ctx, pctx, treq.task_id ) | ecor::sink_err );
+                        res.sub.canceled = !opt_err;
 
                         reply           = prepare_reply( ctx.loop, msg.req_id );
                         reply.which_sub = unit_to_hub_task_tag;
@@ -260,10 +292,10 @@ inline task< unit_to_hub > on_msg(
                                 spdlog::error( "Memory allocation failed for folder entry" );
                                 break;
                         }
-                        spdlog::debug( "Adding folder entry: {}", it->name );
+                        spdlog::debug( "Adding folder entry: {}", it->first.name );
                         res.entries = new ( p ) npb_str{
                             .next = res.entries,
-                            .str  = it->name,
+                            .str  = it->first.name,
                         };
                 }
 
@@ -319,6 +351,9 @@ inline task< unit_to_hub > on_msg(
 
                 list_tasks_resp res = {};
 
+                auto used       = co_await task_list( ctx, pctx, sub.offset, res.tasks );
+                res.tasks_count = used.size();
+
                 reply                = prepare_reply( ctx.loop, msg.req_id );
                 reply.which_sub      = unit_to_hub_list_tasks_tag;
                 reply.sub.list_tasks = res;
@@ -340,7 +375,7 @@ on_raw_msg( task_ctx& ctx, client::promise p, std::span< uint8_t > buffer, auto 
 
         if ( !pb_decode( &stream, hub_to_unit_fields, &hu_msg ) ) {
                 spdlog::error( "Decoding error: {}", PB_GET_ERROR( &stream ) );
-                co_await error::decoding_failed;
+                co_yield ecor::with_error{ error::decoding_failed };
         }
 
         unit_to_hub reply = co_await f( ctx, mem, hu_msg );
@@ -351,13 +386,13 @@ on_raw_msg( task_ctx& ctx, client::promise p, std::span< uint8_t > buffer, auto 
         if ( pp == nullptr ) {
                 spdlog::error(
                     "Memory allocation failed, {}/{}", mem.used_bytes(), mem.capacity() );
-                co_await error::memory_allocation_failed;
+                co_yield ecor::with_error{ error::memory_allocation_failed };
         }
         npb_ostream_ctx ictx{ .buff = { pp, repl_size } };
         pb_ostream_t    ostream = npb_ostream_from( ictx );
         if ( !pb_encode( &ostream, unit_to_hub_fields, &reply ) ) {
                 spdlog::error( "Encoding error: {}", PB_GET_ERROR( &ostream ) );
-                co_await error::encoding_failed;
+                co_yield ecor::with_error{ error::encoding_failed };
         }
         spdlog::debug( "Sending: {}", std::vector< int >{ pp, pp + ostream.bytes_written } );
         // XXX: no ignore
@@ -403,7 +438,7 @@ inline task< void > unit_ctx_loop( auto& tctx, unit_ctx& uctx, std::string_view 
 
         if ( int e = trctl::client_init( uctx.cl, tctx.loop, address, port ); e ) {
                 spdlog::error( "Client init failed: {}", uv_strerror( e ) );
-                co_await error::input_error;
+                co_yield ecor::with_error{ error::input_error };
         }
         auto r = ecor::repeater(
             uctx.cl.incoming() |

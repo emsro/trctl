@@ -112,9 +112,25 @@ struct async_sender_fifo
         };
 
         template < ecor::sender S >
-        _sender< S > enque( S x )
+        _sender< S > wrap( S x )
         {
                 return _sender< S >{ this, std::move( x ) };
+        }
+
+        struct _wrap
+        {
+                async_sender_fifo* fifo;
+
+                template < ecor::sender S >
+                friend auto operator|( S&& s, _wrap&& self ) noexcept
+                {
+                        return self.fifo->wrap( (S&&) s );
+                }
+        };
+
+        _wrap wrap()
+        {
+                return { this };
         }
 
 private:

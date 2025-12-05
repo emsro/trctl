@@ -94,7 +94,7 @@ struct client
         uv_tcp_t     tcp;
         uv_connect_t connect;
 
-        uint8_t       rx_buffer[1024 * 2];
+        uint8_t       rx_buffer[1024 * 8];
         cobs_receiver recv{ rx_buffer };
 
         uint8_t                buffer[1024 * 1024];
