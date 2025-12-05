@@ -15,7 +15,7 @@ static constexpr std::size_t folder_max_name_l = 32;
 
 struct folder_dep : zll::ll_base< folder_dep >
 {
-        virtual task< async_ptr< folder_dep > > shutdown() = 0;
+        virtual task< void > shutdown() = 0;
 };
 
 struct folder_name
@@ -29,22 +29,45 @@ struct folder_name
         }
 };
 
-struct folder_ctx
+struct folder_ctx : comp_buff, task_ctx
 {
-        char                       path[folder_max_path_l];
+        std::string                path;
         zll::ll_list< folder_dep > deps;
+
+        folder_ctx( async_ptr_source< folder_ctx >, uv_loop_t* l, task_core& c, std::string path )
+          : task_ctx( l, c, comp_buff::buffer )
+          , path( std::move( path ) )
+        {
+        }
+
+        task< void > destroy()
+        {
+                spdlog::info( "Killing a folder structure" );
+                for ( auto& d : deps )
+                        co_await d.shutdown();
+                co_return;
+        }
 };
 
-struct folders_ctx
+struct folders_ctx : comp_buff, task_ctx
 {
         std::filesystem::path& workdir;
 
-        uint8_t                buffer[1024 * 1024] = {};
-        circular_buffer_memory mem{ std::span{ buffer } };
+        folders_ctx( uv_loop_t* l, task_core& c, std::filesystem::path& wd )
+          : task_ctx( l, c, comp_buff::buffer )
+          , workdir( wd )
+          , flds( l, c, buffer )
+        {
+        }
 
-        using m     = map< folder_name, folder_ctx >;
-        using alloc = typename m::allocator_type;
-        m flds{ alloc{ mem } };
+        task< void > shutdown()
+        {
+                co_await flds.shutdown();
+        }
+
+        uint8_t buffer[1024 * 1024];
+
+        async_map< folder_name, folder_ctx > flds;
 };
 
 task< void > folder_init( auto& tctx, folders_ctx& ctx )
@@ -72,21 +95,20 @@ task< void > folder_init( auto& tctx, folders_ctx& ctx )
                     spdlog::info( "Loading folder: {}", entr.name );
 
                     folder_name name;
-                    folder_ctx  fc          = {};
                     std::string folder_name = entr.name;
                     if ( folder_name.size() >= sizeof( name.name ) ) {
                             spdlog::error( "Folder name '{}' is too long", folder_name );
                             co_yield ecor::with_error{ error::input_error };
                     }
                     std::strncpy( name.name, folder_name.c_str(), sizeof( name.name ) - 1 );
-                    std::strncpy(
-                        fc.path, path( "/" )( folder_name ).str(), sizeof( fc.path ) - 1 );
+                    std::string p = path( "/" )( folder_name ).str();
 
-                    auto [iter, inserted] = ctx.flds.try_emplace( name, std::move( fc ) );
-                    if ( !inserted ) {
+                    if ( ctx.flds.find( name ) != ctx.flds.end() ) {
                             spdlog::error( "Duplicate folder name '{}'", name.name );
                             co_yield ecor::with_error{ error::input_error };
                     }
+                    ctx.flds.emplace(
+                        name, tctx.loop, ecor::get_task_core( tctx ), std::move( p ) );
             } );
 }
 
@@ -99,22 +121,16 @@ task< void > folder_create( auto& tctx, folders_ctx& ctx, char const* n )
         }
 
         folder_name name;
-        folder_ctx  fc = {};
         if ( strlen( n ) >= sizeof( name.name ) ) {
                 spdlog::error( "Folder name '{}' is too long", name.name );
                 co_yield ecor::with_error{ error::input_error };
         }
         std::strncpy( name.name, n, sizeof( name.name ) - 1 );
-        auto folder_path = ( ctx.workdir / name.name ).string();
-        if ( folder_path.size() >= sizeof( fc.path ) ) {
-                spdlog::error( "Folder path '{}' is too long", folder_path );
-                co_yield ecor::with_error{ error::input_error };
-        }
-        std::strncpy( fc.path, folder_path.c_str(), sizeof( fc.path ) - 1 );
+        std::string folder_path = ( ctx.workdir / name.name ).string();
 
         co_await fs_mkdir{ tctx.loop, folder_path.c_str(), 0700 };
 
-        ctx.flds.try_emplace( name, std::move( fc ) );
+        ctx.flds.emplace( name, tctx.loop, tctx.core, std::move( folder_path ) );
         spdlog::info( "Created folder '{}'", folder_path );
 }
 
@@ -126,13 +142,13 @@ task< void > folder_delete( auto& tctx, folders_ctx& ctx, char const* name )
                 co_yield ecor::with_error{ error::input_error };
         }
 
-        for ( auto& d : iter->second.deps )
+        for ( auto& d : iter->second->deps )
                 co_await d.shutdown();
 
         fs_rm_rf_buff_entry dir_buf[32] = {};
         char                dir_path[folder_max_path_l];
         fixed_str           dir_path_str{ dir_path };
-        co_await fs_rm_rf{ tctx.loop, dir_path_str( iter->second.path ), dir_buf };
+        co_await fs_rm_rf{ tctx.loop, dir_path_str( iter->second->path ), dir_buf };
 
         ctx.flds.erase( iter );
 }
@@ -148,10 +164,10 @@ task< void > folder_clear( auto& tctx, folders_ctx& ctx, char const* name )
         fs_rm_rf_buff_entry dir_buf[32] = {};
         char                dir_path[folder_max_path_l];
         fixed_str           dir_path_str{ dir_path };
-        spdlog::info( "Clearing folder {} path '{}'", iter->first.name, iter->second.path );
-        auto n = dir_path_str( iter->second.path );
+        spdlog::info( "Clearing folder {} path '{}'", iter->first.name, iter->second->path );
+        auto n = dir_path_str( iter->second->path );
         co_await fs_rm_rf{ tctx.loop, n, dir_buf };
-        co_await fs_mkdir{ tctx.loop, iter->second.path, 0700 };
+        co_await fs_mkdir{ tctx.loop, iter->second->path.c_str(), 0700 };
 }
 
 }  // namespace trctl

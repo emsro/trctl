@@ -36,12 +36,12 @@ struct unit_ctx : comp_buff, task_ctx
                 co_await slots.shutdown();
                 co_await pctx.shutdown();
                 co_await fctx.shutdown();
-                co_return;
+                co_await folctx.shutdown();
         }
 
         client            cl;
         file_transfer_ctx fctx{ loop, core, workdir };
-        folders_ctx       folctx{ .workdir = workdir };
+        folders_ctx       folctx{ loop, core, workdir };
         uint32_t          pctx_buffer[1024 * 8];
         proc_ctx          pctx{ loop, core };
 
@@ -117,7 +117,7 @@ inline task< unit_to_hub > on_msg(
                                         ftr.seq,
                                         sp.data(),
                                         sub.filesize,
-                                        iter->second.deps ) |
+                                        iter->second->deps ) |
                                     ecor::sink_err );
                                 if ( opt_err )
                                         spdlog::error( "Error during start transfer" );

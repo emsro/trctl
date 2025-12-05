@@ -29,6 +29,7 @@ template < typename T >
 struct async_map_core_base
 {
         zll::ll_list< async_ptr_core< T > > to_del;
+        async_ptr_core< T >*                to_erase = nullptr;
 
         virtual void clear( async_ptr_core< T >& ) = 0;
 };
@@ -36,14 +37,14 @@ struct async_map_core_base
 template < typename K, typename T >
 struct async_map_core : async_map_core_base< T >
 {
-        std::map< K, async_ptr< T > > _m;
+        std::map< K, async_ptr< T >, std::less<> > m;
 
         void clear( async_ptr_core< T >& c )
         {
-                auto iter = _m.begin();
-                while ( iter != _m.end() ) {
-                        if ( iter->second.get() == &c ) {
-                                _m.erase( iter );
+                auto iter = m.begin();
+                while ( iter != m.end() ) {
+                        if ( iter->second.get() == &c.item ) {
+                                m.erase( iter );
                                 break;
                         }
                 }
@@ -61,7 +62,7 @@ struct async_ptr_source
 
         void clear()
         {
-                raii->clear( this );
+                raii->clear( *this->core );
         }
 
         async_ptr< T > get()
@@ -84,7 +85,7 @@ struct async_ptr_core : zll::ll_base< async_ptr_core< T > >
         template < typename... Args >
         async_ptr_core( async_map_core_base< T >& core, Args&&... args )
           : raii_core( core )
-          , item( async_ptr_source{ core, this }, (Args&&) args... )
+          , item( async_ptr_source< T >{ core, *this }, (Args&&) args... )
         {
         }
 };
@@ -111,14 +112,6 @@ struct async_ptr
                 other.c = nullptr;
         }
 
-        template < typename U >
-                requires( std::convertible_to< U&, T& > )
-        async_ptr( async_ptr< U >&& other )
-          : c( other.c )
-        {
-                other.c = nullptr;
-        }
-
         auto& operator=( async_ptr&& other )
         {
                 auto cpy{ std::move( other ) };
@@ -136,8 +129,20 @@ struct async_ptr
                 return &c->item;
         }
 
+        [[nodiscard]] operator bool() const
+        {
+                return !!c;
+        }
+
+        T* get()
+        {
+                return &c->item;
+        }
+
         ~async_ptr()
         {
+                if ( !c )
+                        return;
                 c->cnt--;
                 if ( c->cnt == 0 )
                         c->raii_core.to_del.link_back( *c );
@@ -159,78 +164,92 @@ struct async_map : component
         async_map( uv_loop_t* l, task_core& c, std::span< uint8_t > mem_buffer )
           : component( l, c, mem_buffer )
         {
-                idle.data = this;
-                uv_idle_init( loop, &idle );
-                uv_idle_start(
-                    &idle, +[]( uv_idle_t* handle ) {
-                            auto& self = *static_cast< component* >( handle->data );
-                            self.tick();
-                    } );
         }
 
         template < typename... Args >
         async_ptr< T > emplace( K key, Args&&... args )
         {
                 auto iter = _core.m.find( key );
-                if ( iter == _core.m.end() )
+                if ( iter != _core.m.end() )
                         return {};
-                auto* p = new async_ptr_core< T >{ (Args&&) args... };
-                _core.m.emplace_hint( iter, std::move( key ), async_ptr< T >{ p } );
-                return { p };
+                return emplace( iter, key, (Args&&) args... );
         }
 
+        using iterator = typename std::map< K, async_ptr< T > >::iterator;
+
         template < typename... Args >
-        async_ptr< T > emplace( auto iter, K key, Args&&... args )
+        async_ptr< T > emplace( iterator iter, K key, Args&&... args )
         {
-                auto* p = new async_ptr_core< T >{ (Args&&) args... };
-                _core.m.emplace_hint( iter, std::move( key ), async_ptr< T >{ p } );
-                return { p };
+                auto* p = new async_ptr_core< T >{ _core, (Args&&) args... };
+                _core.m.emplace_hint( iter, std::move( key ), async_ptr< T >{ *p } );
+                return { *p };
         }
 
         [[nodiscard]] std::size_t size() const
         {
-                return _core._m.size();
+                return _core.m.size();
         }
 
-        auto find( this auto& self, auto& k )
+        auto find( this auto& self, auto&& k )
         {
-                return self._core._m.find( k );
+                return self._core.m.find( k );
         }
 
         auto begin( this auto& self )
         {
-                return self._core._m.begin();
+                return self._core.m.begin();
+        }
+
+        auto rbegin( this auto& self )
+        {
+                return self._core.m.rbegin();
         }
 
         auto end( this auto& self )
         {
-                return self._core._m.end();
+                return self._core.m.end();
+        }
+
+        auto rend( this auto& self )
+        {
+                return self._core.m.rend();
         }
 
         void erase( auto iter )
         {
-                _core._m.erase( iter );
+                _core.m.erase( iter );
         }
 
         task< void > shutdown() override
         {
-                _core._m.clear();
-                for ( auto& x : _core.to_del )
-                        co_await ( x.shutdown() | ecor::err_to_val | ecor::as_variant );
+                _core.m.clear();
+                if ( !_core.to_del.empty() )
+                        co_await _on_all_destroyed.schedule();
+                co_return;
         }
 
         ~async_map()
         {
                 uv_idle_stop( &idle );
+                while ( !_core.to_del.empty() ) {
+                        auto& x = _core.to_del.take_front();
+                        delete &x;
+                }
         }
 
 private:
         void tick() override
         {
+                if ( auto* p = std::exchange( _core.to_erase, nullptr ) ) {
+                        _destroy_task.clear();
+                        delete p;
+                }
                 if ( !_destroy_task && !_core.to_del.empty() ) {
                         auto& x       = _core.to_del.take_front();
-                        _destroy_task = x.shutdown().connect( _destroy_recv{ this, &x } );
+                        _destroy_task = x.item.destroy().connect( _destroy_recv{ this, &x } );
                         _destroy_task.start();
+                } else if ( !!_destroy_task && _core.to_del.empty() ) {
+                        _on_all_destroyed.set_value();
                 }
         }
 
@@ -241,20 +260,25 @@ private:
                 async_map< K, T >*   map;
                 async_ptr_core< T >* x;
 
-                void on_value()
+                void set_value()
                 {
-                        delete &x;
+                        map->_core.to_erase = x;
                 }
 
-                void on_error( auto& )
+                void set_error( auto&& )
                 {
-                        delete &x;
+                        map->_core.to_erase = x;
+                }
+
+                void set_stopped()
+                {
+                        map->_core.to_erase = x;
                 }
         };
 
         uv_loop_t*                                        _loop;
-        uv_idle_t                                         _idle;
         async_map_core< K, T >                            _core;
+        ecor::broadcast_source< ecor::set_value_t() >     _on_all_destroyed;
         ecor::connect_type< task< void >, _destroy_recv > _destroy_task;
 };
 

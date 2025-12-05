@@ -62,7 +62,7 @@ target_link_libraries(unit PRIVATE CLI11::CLI11 trctl_lib)
 
 if(TRCTL_TESTS_ENABLED)
   enable_testing()
-  file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS src/test/*_utest.cpp src/unit/test/*_utest.cpp)
+  file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS src/test/*_utest.cpp src/unit/test/*_utest.cpp src/util/test/*_utest.cpp)
 
   add_executable(tests ${TEST_SOURCES})
   target_link_libraries(tests PRIVATE gtest_main trctl_lib)

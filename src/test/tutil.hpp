@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../task.hpp"
+
 #include <ecor/ecor.hpp>
 #include <gtest/gtest.h>
 #include <uv.h>
@@ -20,23 +22,16 @@ struct nd_mem
         }
 };
 
-struct test_ctx : ecor::task_core
+struct test_ctx : task_core
 {
         nd_mem                     mem;
         ecor::task_memory_resource alloc{ mem };
         uv_loop_t*                 loop = uv_default_loop();
-        uv_idle_t                  idle;
         ecor::inplace_stop_source  stop;
 
         test_ctx()
+          : task_core( uv_default_loop() )
         {
-                idle.data = this;
-                uv_idle_init( loop, &idle );
-                uv_idle_start(
-                    &idle, +[]( uv_idle_t* handle ) {
-                            auto& self = *static_cast< test_ctx* >( handle->data );
-                            self.run_once();
-                    } );
         }
 
         test_ctx( test_ctx const& )            = delete;
@@ -44,14 +39,9 @@ struct test_ctx : ecor::task_core
         test_ctx( test_ctx&& )                 = delete;
         test_ctx& operator=( test_ctx&& )      = delete;
 
-        void reschedule( ecor::_itask_op& op )
-        {
-                ecor::task_core::reschedule( op );
-        }
-
         auto& query( ecor::get_task_core_t ) noexcept
         {
-                return (ecor::task_core&) *this;
+                return (task_core&) *this;
         }
 
         auto& query( ecor::get_memory_resource_t ) noexcept
@@ -62,11 +52,6 @@ struct test_ctx : ecor::task_core
         auto query( ecor::get_stop_token_t ) const noexcept
         {
                 return stop.get_token();
-        }
-
-        ~test_ctx()
-        {
-                uv_idle_stop( &idle );
         }
 };
 

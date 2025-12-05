@@ -74,14 +74,20 @@ struct file_transfer_slot : folder_dep, comp_buff, task_ctx
                 fh = 0;
         }
 
-        task< async_ptr< folder_dep > > shutdown()
+        task< void > shutdown() override
+        {
+                src.clear();
+                co_return;
+        }
+
+        task< void > destroy()
         {
                 spdlog::info( "Shutting down file transfer slot for file: {}", path );
                 if ( fh != 0 ) {
                         co_await fs_close{ loop, fh };
                         co_await fs_unlink{ loop, path.c_str() };
                 }
-                co_return src.get();
+                co_return;
         };
 };
 
@@ -127,8 +133,8 @@ task< void > start_transfer(
                 co_yield ecor::with_error{ error::input_error };
         }
 
-        iter = ctx.transfers.emplace( iter, id, tctx.loop, tctx.core, filesize, filename, deps );
-        auto& slot = iter->second;
+        auto slot =
+            ctx.transfers.emplace( iter, id, tctx.loop, tctx.core, filesize, filename, deps );
         co_await ( slot->start() | slot->workers.wrap() );
 }
 
