@@ -99,9 +99,8 @@ message task_req{
 message task_resp{
     uint32 task_id = 1;
     oneof sub{
-        bool started = 2;
+        bool success = 2;
         task_progress_resp progress = 3;
-        bool canceled = 4;
     }
 }
 

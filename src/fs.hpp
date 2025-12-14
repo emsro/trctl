@@ -126,9 +126,7 @@ struct _fs_close
                             auto& op = *( (OP*) fs->data );
                             if ( fs->result < 0 ) {
                                     spdlog::error(
-                                        "Failed to close file {}: {}",
-                                        fs->path,
-                                        uv_strerror( fs->result ) );
+                                        "Failed to close file: {}", uv_strerror( fs->result ) );
                                     op.recv.set_error( error::libuv_error );
                                     return;
                             }

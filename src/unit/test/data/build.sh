@@ -1,2 +1,2 @@
 #!/bin/bash
-echo "build_complete"
+echo -n "build_complete"

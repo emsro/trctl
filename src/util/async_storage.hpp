@@ -155,6 +155,27 @@ private:
         friend struct async_ptr;
 };
 
+template < typename T >
+concept has_destroy_member_function = requires( T x ) {
+        { x.destroy() } -> std::same_as< task< void > >;
+};
+
+struct do_destroy_t
+{
+
+        template < typename T >
+        task< void > operator()( auto& ctx, T& x )
+        {
+                if constexpr ( has_destroy_member_function< T > )
+                        return x.destroy();
+                else
+                        return destroy( ctx, x );
+        }
+};
+
+inline static do_destroy_t do_destroy;
+
+
 template < typename K, typename T >
 struct async_map : component
 {
@@ -176,6 +197,17 @@ struct async_map : component
         }
 
         using iterator = typename std::map< K, async_ptr< T > >::iterator;
+
+        template < typename... Args >
+        std::pair< iterator, bool > try_emplace( K key, Args&&... args )
+        {
+                auto iter = _core.m.find( key );
+                if ( iter != _core.m.end() )
+                        return { iter, false };
+                auto* p = new async_ptr_core< T >{ _core, (Args&&) args... };
+                iter    = _core.m.emplace_hint( iter, std::move( key ), async_ptr< T >{ *p } );
+                return { iter, true };
+        }
 
         template < typename... Args >
         async_ptr< T > emplace( iterator iter, K key, Args&&... args )
@@ -246,7 +278,8 @@ private:
                 }
                 if ( !_destroy_task && !_core.to_del.empty() ) {
                         auto& x       = _core.to_del.take_front();
-                        _destroy_task = x.item.destroy().connect( _destroy_recv{ this, &x } );
+                        _destroy_task = do_destroy( (task_ctx&) *this, x.item )
+                                            .connect( _destroy_recv{ this, &x } );
                         _destroy_task.start();
                 } else if ( !!_destroy_task && _core.to_del.empty() ) {
                         _on_all_destroyed.set_value();

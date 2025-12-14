@@ -49,7 +49,7 @@ struct unit_ctx : comp_buff, task_ctx
 };
 
 
-inline unit_to_hub prepare_reply( uv_loop_t* loop, uint32_t req_id )
+inline unit_to_hub prepare_reply( uv_loop_t* loop, uint64_t req_id )
 {
         unit_to_hub msg = unit_to_hub_init_default;
         msg.req_id      = req_id;
@@ -171,7 +171,7 @@ inline task< unit_to_hub > on_msg(
 
                         task_resp res;
                         res.task_id   = treq.task_id;
-                        res.which_sub = task_resp_started_tag;
+                        res.which_sub = task_resp_success_tag;
 
                         std::array< char*, 32 > args;
                         std::size_t             i = 0;
@@ -187,7 +187,7 @@ inline task< unit_to_hub > on_msg(
                         args[i] = nullptr;
                         if ( i == args.size() - 1 ) {
                                 spdlog::error( "Too many args for task execution" );
-                                res.sub.started = false;
+                                res.sub.success = false;
                         }
 
                         static constexpr std::size_t n = 128;
@@ -199,7 +199,7 @@ inline task< unit_to_hub > on_msg(
                         auto opt_err = co_await (
                             task_start( ctx, pctx, treq.task_id, "/bin/bash", sp.data(), args ) |
                             ecor::sink_err );
-                        res.sub.started = !opt_err;
+                        res.sub.success = !opt_err;
 
                         reply           = prepare_reply( ctx.loop, msg.req_id );
                         reply.which_sub = unit_to_hub_task_tag;
@@ -210,15 +210,16 @@ inline task< unit_to_hub > on_msg(
                         spdlog::info( "Progress request for task ID {}", treq.task_id );
 
                         task_resp res;
-                        res.task_id      = treq.task_id;
-                        res.which_sub    = task_resp_progress_tag;
-                        res.sub.progress = task_progress_resp{};
+                        res.task_id = treq.task_id;
 
                         // XXX: error handling
                         auto r = co_await (
                             task_progress( ctx, pctx, treq.task_id ) | ecor::err_to_val |
                             ecor::as_variant );
                         if ( auto* progress = std::get_if< progress_report >( &r ) ) {
+                                res.which_sub    = task_resp_progress_tag;
+                                res.sub.progress = task_progress_resp{};
+
                                 auto& evt = progress->event;
                                 if ( auto* x = std::get_if< proc_stream::exit_evt >( &evt ) ) {
                                         res.sub.progress.which_sub =
@@ -237,8 +238,9 @@ inline task< unit_to_hub > on_msg(
                                 }
                                 res.sub.progress.events_left = progress->events_n;
                         } else {
-                                // XXX: we do not really know what ot do otherwise
-                                std::abort();
+                                spdlog::error( "Failed to get task progress" );
+                                res.which_sub   = task_resp_success_tag;
+                                res.sub.success = false;
                         }
 
                         spdlog::info(
@@ -256,11 +258,11 @@ inline task< unit_to_hub > on_msg(
 
                         task_resp res;
                         res.task_id   = treq.task_id;
-                        res.which_sub = task_resp_canceled_tag;
+                        res.which_sub = task_resp_success_tag;
 
                         auto opt_err =
                             co_await ( task_cancel( ctx, pctx, treq.task_id ) | ecor::sink_err );
-                        res.sub.canceled = !opt_err;
+                        res.sub.success = !opt_err;
 
                         reply           = prepare_reply( ctx.loop, msg.req_id );
                         reply.which_sub = unit_to_hub_task_tag;
@@ -292,7 +294,6 @@ inline task< unit_to_hub > on_msg(
                                 spdlog::error( "Memory allocation failed for folder entry" );
                                 break;
                         }
-                        spdlog::debug( "Adding folder entry: {}", it->first.name );
                         res.entries = new ( p ) npb_str{
                             .next = res.entries,
                             .str  = it->first.name,

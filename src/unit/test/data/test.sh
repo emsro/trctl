@@ -1,2 +1,2 @@
 #!/bin/bash
-echo "script_output"
+echo -n "script_output"

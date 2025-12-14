@@ -18,6 +18,7 @@ struct file_transfer_slot : folder_dep, comp_buff, task_ctx
         async_sender_fifo                      workers;
         uv_file                                fh;
         uint64_t                               filesize;
+        uint64_t                               written_bytes = 0;
         std::string                            path;
 
         file_transfer_slot(
@@ -49,6 +50,7 @@ struct file_transfer_slot : folder_dep, comp_buff, task_ctx
                 spdlog::info(
                     "Writing {} bytes at offset {} to file (fh={})", data.size(), offset, fh );
                 co_await fs_write{ loop, fh, offset, data };
+                written_bytes += data.size();
         }
 
         uint8_t buffer[4 * 1024];
@@ -56,6 +58,11 @@ struct file_transfer_slot : folder_dep, comp_buff, task_ctx
         task< void > end( uint32_t expected_hash )
         {
                 spdlog::info( "Finalizing transfer for file (fh={})", fh );
+                if ( written_bytes != filesize ) {
+                        spdlog::error( "Got invalid written size: {}/{}", written_bytes, filesize );
+                        co_yield ecor::with_error{ error::input_error };
+                }
+
                 fnv1a hasher;
                 for ( uint32_t offset = 0; offset < filesize; offset += std::size( buffer ) ) {
                         std::span data = co_await fs_read{ loop, fh, offset, buffer };
@@ -76,7 +83,13 @@ struct file_transfer_slot : folder_dep, comp_buff, task_ctx
 
         task< void > shutdown() override
         {
+                auto p = src.get();
                 src.clear();
+                if ( fh != 0 ) {
+                        co_await fs_close{ loop, fh };
+                        co_await fs_unlink{ loop, path.c_str() };
+                        fh = 0;
+                }
                 co_return;
         }
 
@@ -86,6 +99,7 @@ struct file_transfer_slot : folder_dep, comp_buff, task_ctx
                 if ( fh != 0 ) {
                         co_await fs_close{ loop, fh };
                         co_await fs_unlink{ loop, path.c_str() };
+                        fh = 0;
                 }
                 co_return;
         };

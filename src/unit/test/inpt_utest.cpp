@@ -38,18 +38,59 @@ enum class message_type
         task
 };
 
+struct fields_map
+{
+        using map_type = std::map< std::string, std::string, std::less<> >;
+
+        std::string take( std::string_view name )
+        {
+                if ( auto x = try_take( name ) )
+                        return std::move( *x );
+                spdlog::error( "Missing arg: {}", name );
+                throw std::runtime_error{ "Missing arg " };
+        }
+
+        std::optional< std::string > try_take( std::string_view name )
+        {
+                auto it = _fields.find( name );
+                if ( it == _fields.end() )
+                        return {};
+                auto res = std::move( it->second );
+                _fields.erase( it );
+                return res;
+        }
+
+        auto& operator=( map_type&& m )
+        {
+                _fields = std::move( m );
+                return *this;
+        }
+
+        void finalize()
+        {
+                if ( _fields.empty() )
+                        return;
+                for ( auto& [k, v] : _fields )
+                        spdlog::error( "{}: {}", k, v );
+                throw std::runtime_error{ "Got leftover fields" };
+        }
+
+private:
+        std::map< std::string, std::string, std::less<> > _fields;
+};
+
 struct send_command
 {
-        uint64_t                             req_id;
-        message_type                         msg_type;
-        std::map< std::string, std::string > fields;
+        uint64_t     req_id;
+        message_type msg_type;
+        fields_map   fields;
 };
 
 struct recv_command
 {
-        uint64_t                             req_id;
-        message_type                         msg_type;
-        std::map< std::string, std::string > fields;
+        uint64_t     req_id;
+        message_type msg_type;
+        fields_map   fields;
 };
 
 struct executor_command
@@ -61,11 +102,12 @@ struct executor_command
                 not_exists,
                 folder_empty,
                 active_transfers,
-                active_tasks
+                active_tasks,
+                skip
         };
 
-        kind                                 cmd;
-        std::map< std::string, std::string > fields;
+        kind       cmd;
+        fields_map fields;
 };
 
 using test_command = std::variant< send_command, recv_command, executor_command >;
@@ -232,6 +274,8 @@ std::optional< executor_command::kind > parse_executor_kind( std::string_view s 
 {
         if ( s == "checksum" )
                 return executor_command::kind::checksum;
+        if ( s == "skip" )
+                return executor_command::kind::skip;
         if ( s == "exists" )
                 return executor_command::kind::exists;
         if ( s == "not_exists" )
@@ -245,10 +289,10 @@ std::optional< executor_command::kind > parse_executor_kind( std::string_view s 
         return std::nullopt;
 }
 
-std::map< std::string, std::string >
+std::map< std::string, std::string, std::less<> >
 parse_fields( std::vector< std::string > const& tokens, size_t start_idx, parser& p )
 {
-        std::map< std::string, std::string > fields;
+        std::map< std::string, std::string, std::less<> > fields;
         for ( size_t i = start_idx; i < tokens.size(); ++i ) {
                 auto colon = tokens[i].find( ':' );
                 if ( colon == std::string_view::npos )
@@ -261,7 +305,7 @@ parse_fields( std::vector< std::string > const& tokens, size_t start_idx, parser
         return fields;
 }
 
-void autoload_from_file( std::map< std::string, std::string >& fields, parser& p )
+void autoload_from_file( auto& fields, parser& p )
 {
         if ( auto iter = fields.find( "data" );
              iter != fields.end() && iter->second.starts_with( "@" ) ) {
@@ -292,9 +336,10 @@ test_command parse_command( parser& p )
                         p.error( "Invalid message type: " + std::string( tokens[1] ) );
                 cmd.msg_type = *msg_opt;
 
-                cmd.fields = parse_fields( tokens, 2, p );
-                autoload_from_file( cmd.fields, p );
-                return cmd;
+                auto fields = parse_fields( tokens, 2, p );
+                autoload_from_file( fields, p );
+                cmd.fields = std::move( fields );
+                return std::move( cmd );
         } break;
         case '<': {
                 auto tokens = split( line );
@@ -309,8 +354,9 @@ test_command parse_command( parser& p )
                         p.error( "Invalid message type: " + std::string( tokens[1] ) );
                 cmd.msg_type = *msg_opt;
 
-                cmd.fields = parse_fields( tokens, 2, p );
-                autoload_from_file( cmd.fields, p );
+                auto fields = parse_fields( tokens, 2, p );
+                autoload_from_file( fields, p );
+                cmd.fields = std::move( fields );
 
                 return cmd;
         } break;
@@ -324,9 +370,10 @@ test_command parse_command( parser& p )
                         p.error( "Invalid executor command kind: " + std::string( tokens[0] ) );
 
                 executor_command cmd;
-                cmd.cmd    = *kind_opt;
-                cmd.fields = parse_fields( tokens, 1, p );
-                autoload_from_file( cmd.fields, p );
+                cmd.cmd     = *kind_opt;
+                auto fields = parse_fields( tokens, 1, p );
+                autoload_from_file( fields, p );
+                cmd.fields = std::move( fields );
 
                 return cmd;
         } break;
@@ -527,11 +574,13 @@ struct inpt_test : public ::testing::Test
         {
                 SCOPED_TRACE( "case " + tc->title );
                 for ( auto const& cmd : tc->commands ) {
-                        std::visit(
-                            [&]( auto const& c ) {
-                                    execute_command( c );
+                        bool cont = std::visit(
+                            [&]( auto const& c ) -> bool {
+                                    return execute_command( c );
                             },
                             cmd );
+                        if ( !cont )
+                                break;
                 }
         }
 
@@ -540,7 +589,7 @@ private:
         char                   filename_buffer[256];
         circular_buffer_memory mem2{ std::span{ buffer2 } };
 
-        hub_to_unit build_message( send_command const& cmd, circular_buffer_memory& mem )
+        hub_to_unit build_message( send_command cmd, circular_buffer_memory& mem )
         {
                 hub_to_unit msg = hub_to_unit_init_default;
                 msg.req_id      = cmd.req_id;
@@ -555,16 +604,17 @@ private:
                 case message_type::file_transfer_start: {
                         file_transfer_req   ftr = file_transfer_req_init_default;
                         file_transfer_start fts = file_transfer_start_init_default;
-                        if ( auto it = cmd.fields.find( "filename" ); it != cmd.fields.end() ) {
-                                strcpy( filename_buffer, it->second.c_str() );
-                                fts.filename = filename_buffer;
-                        }
-                        if ( auto it = cmd.fields.find( "folder" ); it != cmd.fields.end() )
-                                strcpy( fts.folder, it->second.c_str() );
-                        if ( auto it = cmd.fields.find( "filesize" ); it != cmd.fields.end() )
-                                fts.filesize = std::stoull( it->second );
-                        if ( auto it = cmd.fields.find( "seq" ); it != cmd.fields.end() )
-                                ftr.seq = std::stoul( it->second );
+
+                        auto flnm = cmd.fields.take( "filename" );
+                        strcpy( filename_buffer, flnm.c_str() );
+                        fts.filename = filename_buffer;
+
+                        auto fldr = cmd.fields.take( "folder" );
+                        strcpy( fts.folder, fldr.c_str() );
+
+                        fts.filesize = std::stoull( cmd.fields.take( "filesize" ) );
+                        ftr.seq      = std::stoul( cmd.fields.take( "seq" ) );
+
                         ftr.which_sub         = file_transfer_req_start_tag;
                         ftr.sub.start         = fts;
                         msg.which_sub         = hub_to_unit_file_transfer_tag;
@@ -578,14 +628,22 @@ private:
                         ftd.data.data          = nullptr;
                         ftd.data.size          = 0;
                         ftd.offset             = 0;
-                        if ( auto it = cmd.fields.find( "data" ); it != cmd.fields.end() ) {
-                                ftd.data.data = (uint8_t*) it->second.data();
-                                ftd.data.size = it->second.size();
-                        }
-                        if ( auto it = cmd.fields.find( "offset" ); it != cmd.fields.end() )
-                                ftd.offset = std::stoull( it->second );
-                        if ( auto it = cmd.fields.find( "seq" ); it != cmd.fields.end() )
-                                ftr.seq = std::stoul( it->second );
+
+
+                        auto  data = cmd.fields.take( "data" );
+                        auto* p    = (char*) mem.allocate( data.size(), 1 );
+                        if ( !p )
+                                throw std::runtime_error{ "not enough memory" };
+                        std::memcpy( p, data.data(), data.size() );
+                        ftd.data.data = (uint8_t*) p;
+                        ftd.data.size = data.size();
+
+                        auto off   = cmd.fields.take( "offset" );
+                        ftd.offset = std::stoull( off );
+
+                        auto seq = cmd.fields.take( "seq" );
+                        ftr.seq  = std::stoul( seq );
+
                         ftr.which_sub         = file_transfer_req_data_tag;
                         ftr.sub.data          = ftd;
                         msg.which_sub         = hub_to_unit_file_transfer_tag;
@@ -596,10 +654,13 @@ private:
                 case message_type::file_transfer_end: {
                         file_transfer_req ftr = file_transfer_req_init_default;
                         file_transfer_end fte = file_transfer_end_init_default;
-                        if ( auto it = cmd.fields.find( "seq" ); it != cmd.fields.end() )
-                                ftr.seq = std::stoul( it->second );
-                        if ( auto it = cmd.fields.find( "fnv1a" ); it != cmd.fields.end() )
-                                fte.fnv1a = std::stoul( "0x" + it->second, nullptr, 16 );
+
+                        auto seq = cmd.fields.take( "seq" );
+                        ftr.seq  = std::stoul( seq );
+
+                        auto fnv1a = cmd.fields.take( "fnv1a" );
+                        fte.fnv1a  = std::stoul( "0x" + fnv1a, nullptr, 16 );
+
                         ftr.which_sub         = file_transfer_req_end_tag;
                         ftr.sub.end           = fte;
                         msg.which_sub         = hub_to_unit_file_transfer_tag;
@@ -609,19 +670,22 @@ private:
 
                 case message_type::folder_ctl: {
                         folder_ctl_req fcr = folder_ctl_req_init_default;
-                        if ( auto it = cmd.fields.find( "folder" ); it != cmd.fields.end() )
-                                strcpy( fcr.folder, it->second.c_str() );
+
+                        auto fld = cmd.fields.take( "folder" );
+                        strcpy( fcr.folder, fld.c_str() );
 
                         // Check which oneof field is present
-                        if ( cmd.fields.find( "create" ) != cmd.fields.end() ) {
+                        if ( cmd.fields.try_take( "create" ) ) {
                                 fcr.which_sub  = folder_ctl_req_create_tag;
                                 fcr.sub.create = unit_init_default;
-                        } else if ( cmd.fields.find( "delete" ) != cmd.fields.end() ) {
+                        } else if ( cmd.fields.try_take( "delete" ) ) {
                                 fcr.which_sub = folder_ctl_req_del_tag;
                                 fcr.sub.del   = unit_init_default;
-                        } else if ( cmd.fields.find( "clear" ) != cmd.fields.end() ) {
+                        } else if ( cmd.fields.try_take( "clear" ) ) {
                                 fcr.which_sub = folder_ctl_req_clear_tag;
                                 fcr.sub.clear = unit_init_default;
+                        } else {
+                                throw std::runtime_error{ "Missing folder op" };
                         }
 
                         msg.which_sub      = hub_to_unit_folder_ctl_tag;
@@ -630,27 +694,27 @@ private:
                 }
                 case message_type::list_folder: {
                         list_folders_req lfr = list_folders_req_init_default;
-                        if ( auto it = cmd.fields.find( "offset" ); it != cmd.fields.end() )
-                                lfr.offset = std::stoi( it->second );
-                        if ( auto it = cmd.fields.find( "limit" ); it != cmd.fields.end() )
-                                lfr.limit = std::stoi( it->second );
-                        msg.which_sub       = hub_to_unit_list_folder_tag;
-                        msg.sub.list_folder = lfr;
+                        lfr.offset           = std::stoi( cmd.fields.take( "offset" ) );
+                        lfr.limit            = std::stoi( cmd.fields.take( "limit" ) );
+                        msg.which_sub        = hub_to_unit_list_folder_tag;
+                        msg.sub.list_folder  = lfr;
                         break;
                 }
 
                 case message_type::task_start: {
                         task_req       tr  = task_req_init_default;
                         task_start_req tsr = task_start_req_init_default;
-                        if ( auto it = cmd.fields.find( "task_id" ); it != cmd.fields.end() )
-                                tr.task_id = std::stoul( it->second );
-                        if ( auto it = cmd.fields.find( "folder" ); it != cmd.fields.end() )
-                                strcpy( tsr.folder, it->second.c_str() );
-                        if ( auto it = cmd.fields.find( "args" ); it != cmd.fields.end() ) {
+
+                        tr.task_id = std::stoul( cmd.fields.take( "task_id" ) );
+                        auto fldr  = cmd.fields.take( "folder" );
+                        strcpy( tsr.folder, fldr.c_str() );
+
+                        {
+                                auto      args = cmd.fields.take( "args" );
                                 npb_str** last = &tsr.args;
                                 *last          = nullptr;
 
-                                std::istringstream argss( it->second );
+                                std::istringstream argss( args );
                                 std::string        arg;
                                 while ( std::getline( argss, arg, ',' ) ) {
                                         *last = mem.make< npb_str >( npb_str{
@@ -674,9 +738,8 @@ private:
                 }
 
                 case message_type::task_progress: {
-                        task_req tr = task_req_init_default;
-                        if ( auto it = cmd.fields.find( "task_id" ); it != cmd.fields.end() )
-                                tr.task_id = std::stoul( it->second );
+                        task_req tr     = task_req_init_default;
+                        tr.task_id      = std::stoul( cmd.fields.take( "task_id" ) );
                         tr.which_sub    = task_req_progress_tag;
                         tr.sub.progress = unit_init_default;
                         msg.which_sub   = hub_to_unit_task_tag;
@@ -685,9 +748,8 @@ private:
                 }
 
                 case message_type::task_cancel: {
-                        task_req tr = task_req_init_default;
-                        if ( auto it = cmd.fields.find( "task_id" ); it != cmd.fields.end() )
-                                tr.task_id = std::stoul( it->second );
+                        task_req tr   = task_req_init_default;
+                        tr.task_id    = std::stoul( cmd.fields.take( "task_id" ) );
                         tr.which_sub  = task_req_cancel_tag;
                         tr.sub.cancel = unit_init_default;
                         msg.which_sub = hub_to_unit_task_tag;
@@ -697,8 +759,7 @@ private:
 
                 case message_type::list_tasks: {
                         list_tasks_req ltr = list_tasks_req_init_default;
-                        if ( auto it = cmd.fields.find( "offset" ); it != cmd.fields.end() )
-                                ltr.offset = std::stoi( it->second );
+                        ltr.offset         = std::stoi( cmd.fields.take( "offset" ) );
                         msg.which_sub      = hub_to_unit_list_tasks_tag;
                         msg.sub.list_tasks = ltr;
                         break;
@@ -708,12 +769,14 @@ private:
                 }
                 }
 
+                cmd.fields.finalize();
+
                 return msg;
         }
 
-        void execute_command( send_command const& cmd )
+        bool execute_command( send_command const& cmd )
         {
-                uint8_t                buffer[1024];
+                uint8_t                buffer[1024 * 8];
                 circular_buffer_memory mem{ buffer };
                 hub_to_unit            msg = build_message( cmd, mem );
 
@@ -722,7 +785,7 @@ private:
 
                 bool result = pb_encode( &stream, hub_to_unit_fields, &msg );
                 if ( !result )
-                        ASSERT_TRUE( result )
+                        EXPECT_TRUE( result )
                             << "Failed to encode message: " << PB_GET_ERROR( &stream );
 
                 spdlog::info(
@@ -732,13 +795,14 @@ private:
                     std::vector< int >{ buffer1, buffer1 + stream.bytes_written } );
                 auto status = cobs_send(
                     mem2, &server_client, { std::data( buffer1 ), stream.bytes_written } );
-                ASSERT_EQ( send_status::SUCCESS, status ) << "Failed to send message";
+                EXPECT_EQ( send_status::SUCCESS, status ) << "Failed to send message";
+                return true;
         }
 
 
         unit_to_hub receive_message()
         {
-                for ( std::size_t i = 0; i < 1024; ++i ) {
+                for ( std::size_t i = 0; i < 1024 * 2; ++i ) {
                         uv_run( ctx.loop, UV_RUN_NOWAIT );
                         if ( !received_messages.empty() )
                                 break;
@@ -766,63 +830,62 @@ private:
                 return msg;
         }
 
-        void verify_field(
-            std::map< std::string, std::string > const& expected,
-            std::string const&                          key,
-            std::string_view                            actual )
+        void verify_field( fields_map& expected, std::string const& key, std::string_view actual )
         {
-                auto it = expected.find( key );
-                if ( it != expected.end() )
-                        EXPECT_EQ( it->second, actual ) << "Field mismatch: " << key;
+                if ( auto x = expected.try_take( key ) )
+                        EXPECT_EQ( *x, actual ) << "Field mismatch: " << key;
         }
 
-        void verify_field(
-            std::map< std::string, std::string > const& expected,
-            std::string const&                          key,
-            char const*                                 actual )
+        void verify_field( fields_map& expected, std::string const& key, char const* actual )
         {
-                auto it = expected.find( key );
-                if ( it != expected.end() )
-                        EXPECT_EQ( it->second, actual ) << "Field mismatch: " << key;
+                if ( auto x = expected.try_take( key ) )
+                        EXPECT_EQ( *x, actual ) << "Field mismatch: " << key;
         }
 
         template < typename T >
-                requires( std::same_as< T, uint32_t > || std::same_as< T, uint64_t > )
-        void verify_field(
-            std::map< std::string, std::string > const& expected,
-            std::string const&                          key,
-            T                                           actual )
+                requires(
+                    std::same_as< T, uint32_t > || std::same_as< T, uint64_t > ||
+                    std::same_as< T, int32_t > || std::same_as< T, int64_t > )
+        void verify_field( fields_map& expected, std::string const& key, T actual )
         {
-                auto it = expected.find( key );
-                if ( it != expected.end() )
-                        EXPECT_EQ( std::stoull( it->second ), actual ) << "Field mismatch: " << key;
+                if ( auto x = expected.try_take( key ) )
+                        EXPECT_EQ( std::stoull( *x ), actual ) << "Field mismatch: " << key;
         }
 
-        void verify_field(
-            std::map< std::string, std::string > const& expected,
-            std::string const&                          key,
-            bool                                        actual )
+        void verify_field( fields_map& expected, std::string const& key, bool actual )
         {
-                auto it = expected.find( key );
-                if ( it != expected.end() ) {
-                        bool expected_val = ( it->second == "true" );
+                if ( auto x = expected.try_take( key ) ) {
+                        bool expected_val = ( *x == "true" );
                         EXPECT_EQ( expected_val, actual ) << "Field mismatch: " << key;
                 }
         }
 
-        void verify_field(
-            std::map< std::string, std::string > const& expected,
-            std::string const&                          key,
-            struct npb_data const&                      actual )
+        void
+        verify_field( fields_map& expected, std::string const& key, struct npb_data const& actual )
         {
-                auto it = expected.find( key );
-                if ( it != expected.end() ) {
+                auto f = expected.try_take( key );
+                if ( f ) {
                         std::string_view sv{ (char const*) actual.data, actual.size };
-                        EXPECT_EQ( it->second, sv ) << "Field mismatch: " << key;
+                        EXPECT_EQ( ( *f ), sv )
+                            << "Field mismatch: " << key << " expected: \"" << *f << "\"";
                 }
         }
 
-        void execute_command( recv_command const& cmd )
+        void verify_field_contains(
+            fields_map&            expected,
+            std::string const&     key,
+            struct npb_data const& actual )
+        {
+                auto f = expected.try_take( key );
+                if ( f ) {
+                        std::string_view sv{ (char const*) actual.data, actual.size };
+                        bool             match = sv.contains( *f );
+                        EXPECT_TRUE( match ) << "Field mismatch: " << key
+                                             << " expected to contain: \"" << *f << "\"";
+                }
+        }
+
+        bool execute_command( recv_command cmd )
         {
                 unit_to_hub msg = receive_message();
 
@@ -830,7 +893,8 @@ private:
                     "Verifying received message for req_id " + std::to_string( cmd.req_id ) );
 
                 // Verify req_id
-                EXPECT_EQ( cmd.req_id, msg.req_id ) << "Request ID mismatch";
+                EXPECT_EQ( cmd.req_id, msg.req_id )
+                    << "Request ID mismatch, expected: " << cmd.req_id;
 
                 // Verify message type and fields
                 switch ( cmd.msg_type ) {
@@ -875,10 +939,8 @@ private:
                 case message_type::task_cancel:
                         EXPECT_EQ( unit_to_hub_task_tag, msg.which_sub );
                         verify_field( cmd.fields, "task_id", msg.sub.task.task_id );
-                        if ( msg.sub.task.which_sub == task_resp_started_tag )
-                                verify_field( cmd.fields, "started", msg.sub.task.sub.started );
-                        else if ( msg.sub.task.which_sub == task_resp_canceled_tag )
-                                verify_field( cmd.fields, "canceled", msg.sub.task.sub.canceled );
+                        if ( msg.sub.task.which_sub == task_resp_success_tag )
+                                verify_field( cmd.fields, "success", msg.sub.task.sub.success );
                         break;
 
                 case message_type::task_progress: {
@@ -887,18 +949,22 @@ private:
                         EXPECT_EQ( task_resp_progress_tag, msg.sub.task.which_sub );
                         auto which_sub = msg.sub.task.sub.progress.which_sub;
                         if ( which_sub == task_progress_resp_sout_tag ) {
-                                verify_field(
+                                spdlog::debug( "Trying sout" );
+                                verify_field_contains(
                                     cmd.fields, "sout", msg.sub.task.sub.progress.sub.sout );
                         } else if ( which_sub == task_progress_resp_serr_tag ) {
-                                verify_field(
+                                spdlog::debug( "Trying serr" );
+                                verify_field_contains(
                                     cmd.fields, "serr", msg.sub.task.sub.progress.sub.serr );
                         } else if ( which_sub == task_progress_resp_exit_status_tag ) {
+                                spdlog::debug( "Trying exit status" );
                                 verify_field(
                                     cmd.fields,
                                     "exit_status",
                                     msg.sub.task.sub.progress.sub.exit_status );
                         } else {
-                                FAIL();
+                                EXPECT_TRUE( false );
+                                return false;
                         }
                         break;
                 }
@@ -915,44 +981,43 @@ private:
                         break;
                 }
                 }
+                cmd.fields.finalize();
+                return true;
         }
 
 
-        static std::filesystem::path get_path( executor_command const& cmd )
+        static std::filesystem::path get_path( executor_command& cmd )
         {
-                auto it = cmd.fields.find( "path" );
-                if ( it == cmd.fields.end() ) {
-                        ADD_FAILURE() << "get_path: missing 'path' field";
-                        throw std::runtime_error( "missing 'path' field" );
-                }
-                return it->second;
+                if ( auto x = cmd.fields.try_take( "path" ) )
+                        return *x;
+                ADD_FAILURE() << "get_path: missing 'path' field";
+                throw std::runtime_error( "missing 'path' field" );
         }
 
-        static uint64_t get_fnv1a( executor_command const& cmd )
+        static uint64_t get_fnv1a( executor_command& cmd )
         {
-                auto it = cmd.fields.find( "fnv1a" );
-                if ( it == cmd.fields.end() ) {
-                        ADD_FAILURE() << "get_fnv1a: missing 'fnv1a' field";
-                        throw std::runtime_error( "missing 'fnv1a' field" );
-                }
-                return std::stoull( it->second, nullptr, 16 );
+                if ( auto x = cmd.fields.try_take( "fnv1a" ) )
+                        return std::stoull( *x, nullptr, 16 );
+                ADD_FAILURE() << "get_fnv1a: missing 'fnv1a' field";
+                throw std::runtime_error( "missing 'fnv1a' field" );
         }
 
-        static uint64_t get_count( executor_command const& cmd )
+        static uint64_t get_count( executor_command& cmd )
         {
-                auto it = cmd.fields.find( "count" );
-                if ( it == cmd.fields.end() ) {
-                        ADD_FAILURE() << "get_count: missing 'count' field";
-                        throw std::runtime_error( "missing 'count' field" );
-                }
-                return std::stoull( it->second );
+                if ( auto x = cmd.fields.try_take( "count" ) )
+                        return std::stoull( *x );
+                ADD_FAILURE() << "get_count: missing 'count' field";
+                throw std::runtime_error( "missing 'count' field" );
         }
 
-        void execute_command( executor_command const& cmd )
+        bool execute_command( executor_command cmd )
         {
                 for ( std::size_t i = 0; i < 100; ++i )
                         uv_run( ctx.loop, UV_RUN_NOWAIT );
                 switch ( cmd.cmd ) {
+                case executor_command::kind::skip: {
+                        return false;
+                }
                 case executor_command::kind::checksum: {
                         auto path  = get_path( cmd );
                         auto fnv1a = get_fnv1a( cmd );
@@ -1026,6 +1091,8 @@ private:
                         break;
                 }
                 }
+                cmd.fields.finalize();
+                return true;
         }
 };
 

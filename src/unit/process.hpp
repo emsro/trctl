@@ -5,6 +5,7 @@
 #include "../util.hpp"
 #include "../util/async_optional.hpp"
 #include "../util/async_queue.hpp"
+#include "../util/async_storage.hpp"
 
 #include <deque>
 #include <ranges>
@@ -109,7 +110,7 @@ struct proc : zll::ll_base< proc >
         uv_pipe_t            stdin_pipe, stdout_pipe, stderr_pipe;
         proc_stream          stream;
 
-        proc( uv_loop_t* loop, zll::ll_list< proc >& finished_procs )
+        proc( async_ptr_source< proc >, uv_loop_t* loop, zll::ll_list< proc >& finished_procs )
           : loop( loop )
           , finished_procs( finished_procs )
         {
@@ -198,33 +199,34 @@ struct proc : zll::ll_base< proc >
                 return true;
         }
 
-        static task< void > kill( auto&, proc& p )
-        {
-                if ( !p.process.data )
-                        co_return;
-
-                uv_read_stop( (uv_stream_t*) &p.stdout_pipe );
-                uv_read_stop( (uv_stream_t*) &p.stderr_pipe );
-                uv_process_kill( &p.process, SIGTERM );
-
-                co_await p.stream.exit_status();
-
-                p.process.data = nullptr;
-        }
-
         proc( proc const& )            = delete;
         proc& operator=( proc const& ) = delete;
         proc( proc&& )                 = delete;
         proc& operator=( proc&& )      = delete;
 };
 
+task< void > destroy( auto&, proc& p )
+{
+        if ( !p.process.data )
+                co_return;
+
+        uv_read_stop( (uv_stream_t*) &p.stdout_pipe );
+        uv_read_stop( (uv_stream_t*) &p.stderr_pipe );
+        uv_process_kill( &p.process, SIGTERM );
+
+        co_await p.stream.exit_status();
+
+        p.process.data = nullptr;
+}
+
 struct proc_ctx : comp_buff, component
 {
-        using m = std::map< uint32_t, proc >;
-        m procs{};
+        uint8_t                     proc_mem[1024];
+        async_map< uint32_t, proc > procs;
 
         proc_ctx( uv_loop_t* loop, task_core& core )
           : component( loop, core, comp_buff::buffer )
+          , procs( loop, core, proc_mem )
         {
         }
 
@@ -236,8 +238,7 @@ struct proc_ctx : comp_buff, component
         task< void > shutdown() override
         {
                 spdlog::info( "Shutting down procs: {} procs", procs.size() );
-                for ( auto& [id, p] : procs )
-                        co_await proc::kill( *this, p );
+                co_await procs.shutdown();
                 spdlog::info( "All procs killed" );
                 co_return;
         }
@@ -270,8 +271,8 @@ task< void > task_start(
                 spdlog::error( "Task with ID {} already exists", task_id );
                 co_yield ecor::with_error{ error::input_error };
         }
-        proc& p = it->second;
-        if ( !p.start( binary, cwd, args.data() ) ) {
+        auto& p = it->second;
+        if ( !p->start( binary, cwd, args.data() ) ) {
                 ctx.procs.erase( it );
                 co_yield ecor::with_error{ error::libuv_error };
         }
@@ -292,16 +293,16 @@ task< progress_report > task_progress( auto&, proc_ctx& ctx, uint32_t task_id )
                 spdlog::error( "Task with ID {} not found", task_id );
                 co_yield ecor::with_error{ error::input_error };
         }
-        proc& p = it->second;
+        async_ptr< proc >& p = it->second;
 
         spdlog::debug( "Task with ID {} progress requested", task_id );
 
-        if ( p.stream.exit_status().has_value() ) {
+        if ( p->stream.exit_status().has_value() ) {
                 co_return progress_report{
-                    .event = proc_stream::exit_evt{ co_await p.stream.exit_status() },
+                    .event = proc_stream::exit_evt{ co_await p->stream.exit_status() },
                 };
         }
-        auto dq = co_await p.stream.deque();
+        auto dq = co_await p->stream.deque();
         if ( auto* x = std::get_if< proc_stream::stdout_evt >( &dq ) ) {
                 co_return progress_report{
                     .event = proc_stream::stdout_evt{ std::move( x->mem ) },
@@ -326,9 +327,9 @@ task< void > task_cancel( auto& tctx, proc_ctx& ctx, uint32_t task_id )
                 spdlog::error( "Task with ID {} not found", task_id );
                 co_yield ecor::with_error{ error::input_error };
         }
-        proc& p = it->second;
+        async_ptr< proc >& p = it->second;
         spdlog::info( "Cancelling task ID {}", task_id );
-        co_await proc::kill( tctx, p );
+        co_await destroy( tctx, *p );
         ctx.procs.erase( it );
         co_return;
 }

@@ -71,11 +71,6 @@ public:
         {
                 return alloc;
         }
-
-        auto query( ecor::get_stop_token_t ) const noexcept
-        {
-                return stop.get_token();
-        }
 };
 
 
@@ -167,6 +162,7 @@ private:
         {
                 while ( !s.empty() ) {
                         auto& slot = s.take_front();
+                        spdlog::debug( "Deleting {}", (void*) &slot );
                         delete &slot;
                 }
         }

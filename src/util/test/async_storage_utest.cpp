@@ -8,22 +8,23 @@ namespace trctl
 {
 
 
-struct test_obj : test_ctx
+struct test_obj
 {
         async_ptr_source< test_obj > src;
-        int                          value = 0;
+        int                          value             = 0;
+        int*                         destroyed_counter = 0;
 
-        test_obj( async_ptr_source< test_obj > s, int v )
+        test_obj( async_ptr_source< test_obj > s, int v, int* dc = nullptr )
           : src( s )
           , value( v )
+          , destroyed_counter( dc )
         {
-        }
-
-        task< void > destroy()
-        {
-                co_return;
         }
 };
+task< void > destroy( auto&, test_obj& )
+{
+        co_return;
+}
 
 TEST( async, emplace_find_erase_lifetime )
 {

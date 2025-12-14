@@ -29,25 +29,22 @@ struct folder_name
         }
 };
 
-struct folder_ctx : comp_buff, task_ctx
+struct folder_ctx
 {
         std::string                path;
         zll::ll_list< folder_dep > deps;
 
-        folder_ctx( async_ptr_source< folder_ctx >, uv_loop_t* l, task_core& c, std::string path )
-          : task_ctx( l, c, comp_buff::buffer )
-          , path( std::move( path ) )
+        folder_ctx( async_ptr_source< folder_ctx >, std::string path )
+          : path( std::move( path ) )
         {
-        }
-
-        task< void > destroy()
-        {
-                spdlog::info( "Killing a folder structure" );
-                for ( auto& d : deps )
-                        co_await d.shutdown();
-                co_return;
         }
 };
+task< void > destroy( auto&, folder_ctx& f )
+{
+        for ( auto& d : f.deps )
+                co_await d.shutdown();
+        co_return;
+}
 
 struct folders_ctx : comp_buff, task_ctx
 {
@@ -107,8 +104,7 @@ task< void > folder_init( auto& tctx, folders_ctx& ctx )
                             spdlog::error( "Duplicate folder name '{}'", name.name );
                             co_yield ecor::with_error{ error::input_error };
                     }
-                    ctx.flds.emplace(
-                        name, tctx.loop, ecor::get_task_core( tctx ), std::move( p ) );
+                    ctx.flds.emplace( name, std::move( p ) );
             } );
 }
 
@@ -120,8 +116,15 @@ task< void > folder_create( auto& tctx, folders_ctx& ctx, char const* n )
                 co_yield ecor::with_error{ error::input_error };
         }
 
+        std::string_view sv{ n };
+        auto             sz = sv.find_first_of( "/" );
+        if ( sz != std::string_view::npos ) {
+                spdlog::error( "Folder name shall not contain / char" );
+                co_yield ecor::with_error{ error::input_error };
+        }
+
         folder_name name;
-        if ( strlen( n ) >= sizeof( name.name ) ) {
+        if ( sv.size() >= sizeof( name.name ) ) {
                 spdlog::error( "Folder name '{}' is too long", name.name );
                 co_yield ecor::with_error{ error::input_error };
         }
@@ -130,7 +133,7 @@ task< void > folder_create( auto& tctx, folders_ctx& ctx, char const* n )
 
         co_await fs_mkdir{ tctx.loop, folder_path.c_str(), 0700 };
 
-        ctx.flds.emplace( name, tctx.loop, tctx.core, std::move( folder_path ) );
+        ctx.flds.emplace( name, std::move( folder_path ) );
         spdlog::info( "Created folder '{}'", folder_path );
 }
 
